@@ -5,4 +5,14 @@ CompileFlags:
   CompilationDatabase: build
   Add: [-I/root/project/yxAgent/src]
 
+# InlayHints（行内提示）：
+#   ParameterNames: No —— 调用处不再显示参数名/参数类型灰字
+#   DeducedTypes:   No —— auto 变量不再显示推导类型灰字
+# 想彻底关掉所有行内提示：把下面 Enabled 改成 No
+# 想只开其中一样：删掉对应行或改回 Yes
+InlayHints:
+  Enabled: Yes
+  ParameterNames: No
+  DeducedTypes: No
+
 # 注意：本文件含服务器绝对路径，本地 Windows 镜像需改成 -IC:/Users/Administrator/Desktop/agents/yxAgent/src
