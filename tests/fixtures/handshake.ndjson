@@ -1,0 +1,7 @@
+{"type":"event","seq":1,"name":"hello","payload":{"protocol_version":"1.0","core_version":"0.0.1","pid":4312}}
+{"type":"request","id":"r1","method":"hello","params":{"protocol_version":"1.0","client_version":"0.0.1"}}
+{"type":"response","id":"r1","ok":true,"result":{"protocol_version":"1.0","core_version":"0.0.1"}}
+{"type":"request","id":"r2","method":"ping","params":{"client_ts":1728970200}}
+{"type":"response","id":"r2","ok":true,"result":{"client_ts":1728970200,"core_ts":1728970200}}
+{"type":"request","id":"r3","method":"shutdown","params":{}}
+{"type":"response","id":"r3","ok":true,"result":{"will_exit":true}}
