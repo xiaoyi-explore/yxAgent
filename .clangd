@@ -1,0 +1,8 @@
+# clangd 配置（S1 引入）：
+# 1. CompilationDatabase 指向 CMake 生成的 build/compile_commands.json（首选）
+# 2. Add 兜底 include 路径——即使数据库缺失也能找到 common/protocol.hpp
+CompileFlags:
+  CompilationDatabase: build
+  Add: [-I/root/project/yxAgent/src]
+
+# 注意：本文件含服务器绝对路径，本地 Windows 镜像需改成 -IC:/Users/Administrator/Desktop/agents/yxAgent/src
