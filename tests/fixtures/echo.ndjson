@@ -1,0 +1,2 @@
+{"type":"request","id":"r4","method":"echo","params":{"line":"hi"}}
+{"type":"response","id":"r4","ok":true,"result":{"line":"hi"}}

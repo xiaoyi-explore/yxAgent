@@ -84,6 +84,7 @@
 | `hello`（方法） | cli→core | request/response | S0 | 版本协商，成功响应即 `welcome` 语义 |
 | `ping`（方法） | cli→core | request/response | S0 | 存活探测与延迟测量 |
 | `shutdown`（方法） | cli→core | request/response | S0 | 协商关闭 |
+| `echo`（方法） | cli→core | request/response | S1 | 开发期回显；S1 的主力调试消息，S2 起被 demo.chat 取代 |
 
 **后续阶段将追加（占位，当前未定义，勿提前实现）**：
 
@@ -223,4 +224,17 @@ S0 没有代码，但可以做三件事，做完才算 S0 完成：
 
 ---
 
-*下一个文档：S1 开始写代码时，先建 `docs/responsibilities.md`（core/cli 职责清单），见 new-agent-stages-v2.md 第三章。*
+---
+
+## 9. 阶段追加记录
+
+### S1 追加：`echo` 方法
+
+| 项 | 内容 |
+|---|---|
+| 报文 | `{"type":"request","id":"r4","method":"echo","params":{"line":"hi"}}` |
+| 响应 | `{"type":"response","id":"r4","ok":true,"result":{"line":"hi"}}` |
+| 语义 | core 把 `params` 原样放进 `result` 返回。它证明管道双向通了，是 cli 的一切后续能力的基础 |
+| 去向 | 调试消息，S2 接入 demo.chat 后逐步退役 |
+
+配套 fixture：`tests/fixtures/echo.ndjson`。
