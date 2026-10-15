@@ -3,8 +3,17 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
-core = sys.argv[1] if len(sys.argv) > 1 else "./build/agent-core"
+# 默认按"本脚本所在位置"定位二进制：<repo>/build/agent-core —— 从任何目录运行都成立。
+# 也可以显式指定：python3 tests/test_s1.py [path/to/agent-core]
+_here = Path(__file__).resolve().parent
+core = sys.argv[1] if len(sys.argv) > 1 else str(_here.parent / "build" / "agent-core")
+if not Path(core).exists():
+    print(f"agent-core not found: {core}")
+    print("先构建:  cmake --build build    或显式指定: python3 tests/test_s1.py <path/to/agent-core>")
+    sys.exit(2)
+print(f"testing: {core}")
 fails = []
 
 def check(name, cond, detail=""):
