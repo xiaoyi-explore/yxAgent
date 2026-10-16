@@ -85,12 +85,13 @@
 | `ping`（方法） | cli→core | request/response | S0 | 存活探测与延迟测量 |
 | `shutdown`（方法） | cli→core | request/response | S0 | 协商关闭 |
 | `echo`（方法） | cli→core | request/response | S1 | 开发期回显；S1 的主力调试消息，S2 起被 demo.chat 取代 |
+| `demo.chat`（方法） | cli→core | request/response | S2 | 假模型对话：先吐一串 `assistant.delta`，最后才回响应 |
+| `assistant.delta`（事件） | core→cli | event | S2 | 流式增量文本；一个 delta 恰好一个 UTF-8 码点 |
 
 **后续阶段将追加（占位，当前未定义，勿提前实现）**：
 
 | 消息 | 引入阶段 | 一句话 |
 |---|---|---|
-| `demo.chat` + `assistant.delta` | S2 | 假模型跑通事件流 |
 | `user.message` / `turn.*` / 真 `assistant.delta` | S3 | 真模型对话 |
 | `tool.call` / `tool.result` | S4 | 工具循环 |
 | `turn.cancel` | S5 | 取消 |
@@ -238,3 +239,29 @@ S0 没有代码，但可以做三件事，做完才算 S0 完成：
 | 去向 | 调试消息，S2 接入 demo.chat 后逐步退役 |
 
 配套 fixture：`tests/fixtures/echo.ndjson`。
+
+### S2 追加：`demo.chat` 方法与 `assistant.delta` 事件
+
+S0 说"一个请求 ↔ 一个响应"，S2 首次让中间长出**事件流**：
+
+```
+cli ──request demo.chat {text} ──────────────────────► core
+cli ◄─event assistant.delta {turn_id, text} ───────── core   seq=N
+cli ◄─event assistant.delta {turn_id, text} ───────── core   seq=N+1
+cli ◄─event assistant.delta ... ───────────────────── core
+cli ◄─response {turn_id, text, stop_reason} ───────── core   ← 流结束后才结算
+```
+
+| 项 | 内容 |
+|---|---|
+| 请求 | `{"type":"request","id":"r5","method":"demo.chat","params":{"text":"你好"}}` |
+| 事件 | `{"type":"event","seq":2,"name":"assistant.delta","payload":{"turn_id":"t1","text":"收"}}` |
+| 响应 | `{"type":"response","id":"r5","ok":true,"result":{"turn_id":"t1","text":"收到第 1 句：「你好」—— ...","stop_reason":"stop"}}` |
+| **不变量 1** | response 一定是本轮**最后一帧**（它宣告本轮结束） |
+| **不变量 2** | `result.text` 恒等于本轮所有 `assistant.delta.text` 的**顺序拼接** |
+| **不变量 3** | 一个 delta 的 `text` 恰好一个 UTF-8 码点，绝不含半个汉字 |
+| 语义 | S2 的假模型是确定性的；S3 换成真 Provider，但**帧的形状不变** |
+| fixture | `tests/fixtures/demo_chat.ndjson`（golden：可逐帧复现） |
+
+为什么响应放最后，而不是先回一个 ack 再流式推送？见 `docs/stage-s2.md` 的决策记录——
+一句话：真实 LLM 也是"流完才知道结果"，先这样设计，S3 就不用再改协议形状。

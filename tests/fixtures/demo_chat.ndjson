@@ -1,0 +1,52 @@
+{"type": "request", "id": "r1", "method": "demo.chat", "params": {"text": "你好"}}
+{"name": "assistant.delta", "payload": {"text": "收", "turn_id": "t1"}, "seq": 2, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "到", "turn_id": "t1"}, "seq": 3, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "第", "turn_id": "t1"}, "seq": 4, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": " ", "turn_id": "t1"}, "seq": 5, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "1", "turn_id": "t1"}, "seq": 6, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": " ", "turn_id": "t1"}, "seq": 7, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "句", "turn_id": "t1"}, "seq": 8, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "：", "turn_id": "t1"}, "seq": 9, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "「", "turn_id": "t1"}, "seq": 10, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "你", "turn_id": "t1"}, "seq": 11, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "好", "turn_id": "t1"}, "seq": 12, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "」", "turn_id": "t1"}, "seq": 13, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "—", "turn_id": "t1"}, "seq": 14, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "—", "turn_id": "t1"}, "seq": 15, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": " ", "turn_id": "t1"}, "seq": 16, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "我", "turn_id": "t1"}, "seq": 17, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "是", "turn_id": "t1"}, "seq": 18, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": " ", "turn_id": "t1"}, "seq": 19, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "S", "turn_id": "t1"}, "seq": 20, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "2", "turn_id": "t1"}, "seq": 21, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": " ", "turn_id": "t1"}, "seq": 22, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "的", "turn_id": "t1"}, "seq": 23, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "假", "turn_id": "t1"}, "seq": 24, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "模", "turn_id": "t1"}, "seq": 25, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "型", "turn_id": "t1"}, "seq": 26, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "，", "turn_id": "t1"}, "seq": 27, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "只", "turn_id": "t1"}, "seq": 28, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "会", "turn_id": "t1"}, "seq": 29, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "把", "turn_id": "t1"}, "seq": 30, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "你", "turn_id": "t1"}, "seq": 31, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "说", "turn_id": "t1"}, "seq": 32, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "的", "turn_id": "t1"}, "seq": 33, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "话", "turn_id": "t1"}, "seq": 34, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "原", "turn_id": "t1"}, "seq": 35, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "样", "turn_id": "t1"}, "seq": 36, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "还", "turn_id": "t1"}, "seq": 37, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "给", "turn_id": "t1"}, "seq": 38, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "你", "turn_id": "t1"}, "seq": 39, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "；", "turn_id": "t1"}, "seq": 40, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "真", "turn_id": "t1"}, "seq": 41, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "模", "turn_id": "t1"}, "seq": 42, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "型", "turn_id": "t1"}, "seq": 43, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "在", "turn_id": "t1"}, "seq": 44, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": " ", "turn_id": "t1"}, "seq": 45, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "S", "turn_id": "t1"}, "seq": 46, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "3", "turn_id": "t1"}, "seq": 47, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": " ", "turn_id": "t1"}, "seq": 48, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "接", "turn_id": "t1"}, "seq": 49, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "入", "turn_id": "t1"}, "seq": 50, "type": "event"}
+{"name": "assistant.delta", "payload": {"text": "。", "turn_id": "t1"}, "seq": 51, "type": "event"}
+{"id": "r1", "ok": true, "result": {"stop_reason": "stop", "text": "收到第 1 句：「你好」—— 我是 S2 的假模型，只会把你说的话原样还给你；真模型在 S3 接入。", "turn_id": "t1"}, "type": "response"}

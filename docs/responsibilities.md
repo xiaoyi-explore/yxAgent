@@ -7,6 +7,7 @@
 | 职责 | 为什么在 core | 引入阶段 | 状态 |
 |---|---|---|---|
 | 按协议应答（hello/ping/echo/shutdown） | 协议语义属于 core | S1 | ✅ |
+| 假模型（demo.chat）—— S2 的可替换接缝 | 先让事件流跑通；S3 换成真 Provider，**帧形状不变** | S2 | ✅ |
 | 与 LLM 的 HTTP/SSE 通信 | 前端不该知道 HTTP 的存在 | S3 | 🔜 |
 | 消息历史（真相状态） | 换前端不丢对话 | S3 | 🔜 |
 | 工具注册表与执行 | 权限判定必须和执行同进程 | S4 | 🔜 |
@@ -23,7 +24,7 @@
 | spawn core + stdio 双管道 | —— | S1 | ✅ |
 | 握手（等 event hello → request hello） | 时序的客户端一侧 | S1 | ✅ |
 | 收集用户输入 → request | —— | S1 | ✅ |
-| 把 `assistant.delta` 渲染成打字机效果 | core 从不发"渲染好的字符串" | S2 起 | 🔜 |
+| 把 `assistant.delta` 渲染成打字机效果（逐帧 flush） | core 从不发"渲染好的字符串" | S2 | ✅ |
 | 审批弹窗（只负责"问"和"回传答案"） | 决策在 core | S8 | 🔜 |
 | TUI 主循环与事件队列 | FTXUI 的线程模型要求 | S9 | 🔜 |
 
@@ -32,6 +33,9 @@
 1. `agent_common` 绝不链接 HTTP 库或 TUI 库。
 2. core 从不向前端发"渲染结果"，只发结构化事件。
 3. 前端不认识 HTTP / 工具 / 上下文这些词。
+4. **已登记的例外**：`--embedded` 让 `agent-cli` 链接了 `agent_core_lib`（S2 引入，Codex 同款做法）。
+   cli 的**源码**仍然不 include 任何 HTTP/TUI 头文件——例外只发生在链接行。S3 接入 HTTP 时，
+   必须把 Provider 挡在 core 内部（`agent_core_lib` 不依赖 httplib），否则铁律会被悄悄侵蚀。
 
 ## S1 代码地图
 

@@ -1,78 +1,53 @@
-// agent-core —— 大脑。S1 只会一件事：按 docs/protocol.md 应答。
-#include "common/protocol.hpp"
-#include <ctime>
+// agent-core —— core 进程的入口：解析参数，把引擎挂到 stdio 上。
+// 从 S2 起真正的逻辑都在 core::CoreEngine 里——这样 cli 的 --embedded 才能直接调用它。
+#include "core/core_engine.hpp"
+
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
-#include <unistd.h>
+#include <string>
 
-using proto::json;  // 协议别名进入全局作用域（S1 的两个 main 都要用）
+using proto::json;
 
-int main() {
+namespace {
+
+void usage() {
+  std::cerr << "usage: agent-core [--log-raw FILE] [--demo-delay-ms N]\n"
+               "  --log-raw FILE      把双向每一帧记到文件（--> 去向 core，<-- 来自 core）\n"
+               "  --demo-delay-ms N   假模型每吐一个字等待的毫秒数（默认 30，0 = 全速）\n";
+}
+
+// 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
+bool opt_value(int argc, char** argv, int& i, const char* key, std::string& out) {
+  const std::string a = argv[i];
+  const std::string k = key;
+  if (a == k) {
+    if (i + 1 >= argc) return false;
+    out = argv[++i];
+    return true;
+  }
+  if (a.rfind(k + "=", 0) == 0) {
+    out = a.substr(k.size() + 1);
+    return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
   std::ios::sync_with_stdio(false);
-  int64_t seq = 0;
-  int exit_code = 0;
 
-  // 第一帧永远是 event hello（protocol.md §4.1）
-  std::cout << proto::frame_event(++seq, "hello", json{
-      {"protocol_version", proto::PROTOCOL_VERSION},
-      {"core_version", proto::CORE_VERSION},
-      {"pid", (int64_t)getpid()}})
-            << std::flush;
-
-  const auto send_err = [&](const json& id, const std::string& code, const std::string& msg) {
-    std::cout << proto::frame_response_err(id, code, msg) << std::flush;
-  };
-
-  std::string line;
-  while (std::getline(std::cin, line)) {
-    if (line.empty()) continue;  // 忍耐空行，不打断会话
-
-    json req = proto::parse_frame(line);
-    if (req.is_null()) {
-      send_err(json(), "PARSE_ERROR", "frame is not a valid JSON object");
-      continue;
-    }
-    // protocol.md §6 未知即忽略：event / response / 未知 type 一律丢弃，绝不响应
-    const std::string ftype = req.contains("type") && req["type"].is_string()
-                            ? req["type"].get<std::string>() : "";
-    if (ftype != "request") continue;
-    if (!proto::is_request(req)) {
-      send_err(proto::extract_id(req), "INVALID_ENVELOPE",
-               "expected a request envelope (type=request with string id and method)");
-      continue;
-    }
-
-    const json& id = req["id"];
-    const std::string method = req["method"].get<std::string>();
-    json params = (req.contains("params") && req["params"].is_object()) ? req["params"] : json::object();
-
-    if (method == "hello") {
-      const std::string pv = params.contains("protocol_version") && params["protocol_version"].is_string()
-                           ? params["protocol_version"].get<std::string>() : "";
-      if (proto::major_of(pv) != proto::major_of(proto::PROTOCOL_VERSION)) {
-        send_err(id, "PROTOCOL_VERSION_MISMATCH",
-                 "core speaks " + std::string(proto::PROTOCOL_VERSION) + ", client sent " + pv);
-        exit_code = 2;  // protocol.md §4.2：major 不兼容 -> core 退出码 2
-        break;
-      }
-      std::cout << proto::frame_response_ok(id, json{
-          {"protocol_version", proto::PROTOCOL_VERSION},
-          {"core_version", proto::CORE_VERSION}}) << std::flush;
-    } else if (method == "ping") {
-      json result = json::object();
-      if (params.contains("client_ts")) result["client_ts"] = params["client_ts"];
-      result["core_ts"] = (int64_t)time(nullptr);
-      std::cout << proto::frame_response_ok(id, result) << std::flush;
-    } else if (method == "echo") {
-      std::cout << proto::frame_response_ok(id, params) << std::flush;
-    } else if (method == "shutdown") {
-      std::cout << proto::frame_response_ok(id, json{{"will_exit", true}}) << std::flush;
-      break;
-    } else {
-      send_err(id, "UNKNOWN_METHOD", "no such method: " + method);
-    }
+  core::Options opts;
+  for (int i = 1; i < argc; ++i) {
+    std::string v;
+    const std::string a = argv[i];
+    if (a == "--help" || a == "-h") { usage(); return 0; }
+    else if (opt_value(argc, argv, i, "--log-raw", v)) opts.log_raw_path = v;
+    else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
+    else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
   }
 
-  // 退出前必须 flush（protocol.md §4.3 铁律）
-  std::cout << std::flush;
-  return exit_code;
+  core::CoreEngine engine(std::move(opts));
+  return engine.run(std::cin, std::cout);
 }

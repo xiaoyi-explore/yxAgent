@@ -1,118 +1,288 @@
-// agent-cli —— 一根管子：spawn core，用户一行 = 一个 echo 请求。没有界面没有状态。
+// agent-cli —— 前端。S2 起它做三件事：
+//   1) 连上 core：默认 spawn 子进程（管道），--embedded 时同进程直连（回调）
+//   2) 握手（protocol.md §4.1）
+//   3) REPL：把用户每行包装成 demo.chat，实时渲染 assistant.delta（打字机效果）
+//
+// 它不认识 HTTP / 工具 / 上下文——那些都在 core 里。前端只消费事件。
 #include "common/protocol.hpp"
+#include "core/core_engine.hpp"
+
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
-using proto::json;  // 协议别名进入全局作用域（S1 的两个 main 都要用）
+using proto::json;
 
-// 从 FILE* 读一行并去行尾；EOF 返回空串
-static std::string read_line(FILE* f) {
-  char* buf = nullptr;
-  size_t cap = 0;
-  const ssize_t n = getline(&buf, &cap, f);
-  if (n < 0) { free(buf); return std::string(); }
-  std::string s(buf, static_cast<size_t>(n));
-  free(buf);
-  while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-  return s;
-}
+namespace {
 
-static void write_frame(FILE* f, const std::string& frame) {
-  fputs(frame.c_str(), f);
-  fflush(f);  // 铁律：写完必 flush（protocol.md §1）
-}
+using EventSink = std::function<void(const json& ev)>;
 
-// 读帧直到拿到 id 匹配的 response；途中的 event 一律忽略（S1 只有 hello 事件）
-static json wait_response(FILE* from_core, const std::string& id) {
-  while (true) {
-    const std::string line = read_line(from_core);
-    if (line.empty()) return json();  // EOF：core 死了
-    json v = proto::parse_frame(line);
-    if (v.is_null()) continue;
-    const std::string type = v.contains("type") && v["type"].is_string() ? v["type"].get<std::string>() : "";
-    if (type == "event") continue;
-    if (type == "response" && v.contains("id") && v["id"].is_string() && v["id"].get<std::string>() == id)
-      return v;
+// ============================ 与 core 的连接 ============================
+// 两种实现，对上层是同一件事：call() 发一个请求，途中事件实时回调，最后拿到响应。
+// 这正是双进程架构的"接缝"：换传输不改上层逻辑（S7 还会加一个 unix socket 实现）。
+class Session {
+ public:
+  virtual ~Session() = default;
+  json hello;  // core 的身份（握手第一步收到的 payload）
+  // 返回最终响应；null json 表示连接断了
+  virtual json call(const std::string& method, const json& params, const EventSink& on_event) = 0;
+  virtual int shutdown() = 0;  // 返回 core 的退出码
+};
+
+// ---------- 实现一：spawn 子进程 + 两根管道（默认，真双进程）----------
+class PipeSession : public Session {
+ public:
+  PipeSession(const std::string& core_path, const core::Options& opts) {
+    std::vector<std::string> args = {core_path};
+    if (!opts.log_raw_path.empty()) args.push_back("--log-raw=" + opts.log_raw_path);
+    args.push_back("--demo-delay-ms=" + std::to_string(opts.demo_delay_ms));
+
+    int to_core[2], from_core[2];
+    if (::pipe(to_core) != 0 || ::pipe(from_core) != 0) throw std::runtime_error("pipe() failed");
+    pid_ = ::fork();
+    if (pid_ < 0) throw std::runtime_error("fork() failed");
+    if (pid_ == 0) {
+      ::dup2(to_core[0], STDIN_FILENO);
+      ::dup2(from_core[1], STDOUT_FILENO);
+      ::close(to_core[0]);
+      ::close(to_core[1]);
+      ::close(from_core[0]);
+      ::close(from_core[1]);
+      std::vector<char*> argv;
+      for (std::string& s : args) argv.push_back(s.data());
+      argv.push_back(nullptr);
+      ::execv(core_path.c_str(), argv.data());
+      std::perror("exec agent-core");
+      ::_exit(127);
+    }
+    ::close(to_core[0]);
+    ::close(from_core[1]);
+    in_ = ::fdopen(to_core[1], "w");
+    out_ = ::fdopen(from_core[0], "r");
+    if (in_ == nullptr || out_ == nullptr) throw std::runtime_error("fdopen() failed");
+
+    // 握手第一步：第一帧永远是 event hello（protocol.md §4.1）
+    const json helo = proto::parse_frame(read_line(out_));
+    if (helo.is_null() || helo.value("name", "") != "hello")
+      throw std::runtime_error("core did not send the hello event");
+    hello = helo.contains("payload") ? helo["payload"] : json::object();
   }
+
+  ~PipeSession() override {
+    if (in_ != nullptr) std::fclose(in_);
+    if (out_ != nullptr) std::fclose(out_);
+    if (pid_ > 0) {
+      int st = 0;
+      ::waitpid(pid_, &st, 0);
+    }
+  }
+
+  json call(const std::string& method, const json& params, const EventSink& on_event) override {
+    const std::string rid = "r" + std::to_string(++next_id_);
+    write_frame(in_, proto::frame_request(rid, method, params));
+    while (true) {
+      const std::string line = read_line(out_);
+      if (line.empty()) return json();  // EOF：core 死了
+      const json v = proto::parse_frame(line);
+      if (v.is_null()) continue;
+      const std::string type = v.value("type", "");
+      if (type == "event") { on_event(v); continue; }
+      if (type == "response" && v.contains("id") && v["id"].is_string() && v["id"].get<std::string>() == rid)
+        return v;
+      // 其他 response（id 不匹配）不属于本次调用，忽略
+    }
+  }
+
+  int shutdown() override {
+    const json bye = call("shutdown", json::object(), [](const json&) {});
+    (void)bye;
+    if (in_ != nullptr) {
+      std::fclose(in_);
+      in_ = nullptr;
+    }
+    int status = 0;
+    if (pid_ > 0) ::waitpid(pid_, &status, 0);
+    const int code = (pid_ > 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1;
+    pid_ = -1;
+    return code;
+  }
+
+ private:
+  static std::string read_line(FILE* f) {
+    char* buf = nullptr;
+    size_t cap = 0;
+    const ssize_t n = ::getline(&buf, &cap, f);
+    if (n < 0) { std::free(buf); return std::string(); }
+    std::string s(buf, static_cast<size_t>(n));
+    std::free(buf);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    return s;
+  }
+  static void write_frame(FILE* f, const std::string& frame) {
+    std::fputs(frame.c_str(), f);
+    std::fflush(f);  // 铁律：写完必 flush（protocol.md §1）
+  }
+
+  pid_t pid_ = -1;
+  FILE* in_ = nullptr;
+  FILE* out_ = nullptr;
+  int64_t next_id_ = 0;
+};
+
+// ---------- 实现二：同进程直连（--embedded）----------
+// 没有 fork、没有管道、没有线程：事件就是一次函数回调。
+// 价值是调试（一次只调一个未知数）；代价是 cli 链接了 core 的静态库（见 docs/stage-s2.md）。
+class EmbeddedSession : public Session {
+ public:
+  explicit EmbeddedSession(core::Options opts) : engine_(std::move(opts)) {
+    hello = engine_.hello_payload();
+  }
+
+  json call(const std::string& method, const json& params, const EventSink& on_event) override {
+    const std::string rid = "r" + std::to_string(++next_id_);
+    const json req = json{{"type", "request"}, {"id", rid}, {"method", method}, {"params", params}};
+    json resp;
+    engine_.handle_request(req, [&](const std::string& frame) {
+      const json f = proto::parse_frame(frame);
+      if (f.is_null()) return;
+      if (f.value("type", "") == "event") {
+        on_event(f);
+      } else {
+        resp = f;  // response 一定是最后到的那一帧（protocol.md §9 S2 的不变量）
+      }
+    });
+    return resp;
+  }
+
+  int shutdown() override {
+    const json bye = call("shutdown", json::object(), [](const json&) {});
+    (void)bye;
+    return 0;  // 没有子进程可回收；报 0 以保持与管道模式输出一致
+  }
+
+ private:
+  core::CoreEngine engine_;
+  int64_t next_id_ = 0;
+};
+
+// ============================ 命令行参数 ============================
+struct CliArgs {
+  bool embedded = false;
+  std::string core_path;
+  core::Options core_opts;
+};
+
+void usage() {
+  std::cerr << "usage: agent-cli [--embedded] [--log-raw FILE] [--demo-delay-ms N] [CORE_PATH]\n"
+               "  --embedded          不 spawn 子进程，同进程直连 core（调试利器）\n"
+               "  --log-raw FILE      透传给 core：抓双向报文\n"
+               "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
+               "  CORE_PATH           agent-core 的路径（默认与本程序同目录）\n";
 }
+
+// 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
+bool opt_value(int argc, char** argv, int& i, const char* key, std::string& out) {
+  const std::string a = argv[i];
+  const std::string k = key;
+  if (a == k) {
+    if (i + 1 >= argc) return false;
+    out = argv[++i];
+    return true;
+  }
+  if (a.rfind(k + "=", 0) == 0) {
+    out = a.substr(k.size() + 1);
+    return true;
+  }
+  return false;
+}
+
+std::string default_core_path(const char* argv0) {
+  const std::string self = (argv0 != nullptr) ? argv0 : "./agent-cli";
+  const auto slash = self.find_last_of('/');
+  return (slash == std::string::npos ? "." : self.substr(0, slash)) + "/agent-core";
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
-  // 默认：core 与 cli 同目录
-  const std::string self = argc > 0 ? argv[0] : "./agent-cli";
-  const auto slash = self.find_last_of('/');
-  const std::string dir = (slash == std::string::npos) ? "." : self.substr(0, slash);
-  const std::string core_path = argc > 1 ? argv[1] : dir + "/agent-core";
-
-  // spawn：两根管道（protocol.md §1：传输层 = stdio）
-  int to_core[2], from_core[2];
-  if (pipe(to_core) != 0 || pipe(from_core) != 0) { perror("pipe"); return 1; }
-  const pid_t pid = fork();
-  if (pid < 0) { perror("fork"); return 1; }
-  if (pid == 0) {
-    dup2(to_core[0], STDIN_FILENO);
-    dup2(from_core[1], STDOUT_FILENO);
-    close(to_core[0]); close(to_core[1]);
-    close(from_core[0]); close(from_core[1]);
-    execl(core_path.c_str(), core_path.c_str(), static_cast<char*>(nullptr));
-    perror("exec agent-core");
-    _exit(127);
+  CliArgs cli;
+  bool core_path_set = false;
+  for (int i = 1; i < argc; ++i) {
+    std::string v;
+    const std::string a = argv[i];
+    if (a == "--help" || a == "-h") { usage(); return 0; }
+    else if (a == "--embedded") cli.embedded = true;
+    else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
+    else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
+    else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
+    else if (!core_path_set) { cli.core_path = a; core_path_set = true; }
+    else { std::cerr << "agent-cli: too many arguments\n"; usage(); return 1; }
   }
-  close(to_core[0]);
-  close(from_core[1]);
-  FILE* core_in  = fdopen(to_core[1], "w");
-  FILE* core_out = fdopen(from_core[0], "r");
+  if (cli.core_path.empty()) cli.core_path = default_core_path(argc > 0 ? argv[0] : nullptr);
 
-  // 握手第一步：等 core 的第一帧 event hello（protocol.md §4.1）
-  const json helo = proto::parse_frame(read_line(core_out));
-  if (helo.is_null() || !helo.contains("name") || helo["name"] != "hello") {
-    std::cerr << "agent-cli: core did not send hello event, aborting\n";
+  std::unique_ptr<Session> session;
+  try {
+    session = cli.embedded ? std::unique_ptr<Session>(new EmbeddedSession(cli.core_opts))
+                           : std::unique_ptr<Session>(new PipeSession(cli.core_path, cli.core_opts));
+  } catch (const std::exception& e) {
+    std::cerr << "agent-cli: " << e.what() << "\n";
     return 1;
   }
-  std::cout << "[core ready] protocol=" << helo["payload"].value("protocol_version", "?")
-            << " core=" << helo["payload"].value("core_version", "?")
-            << " pid=" << helo["payload"].value("pid", 0) << "\n" << std::flush;
 
-  // 握手第二步：request hello（版本协商，成功响应即 welcome）
-  int64_t next_id = 0;
-  const std::string hello_id = "r" + std::to_string(++next_id);
-  write_frame(core_in, proto::frame_request(hello_id, "hello", json{
-      {"protocol_version", proto::PROTOCOL_VERSION},
-      {"client_version", "0.0.1"}}));
-  const json welcome = wait_response(core_out, hello_id);
+  // 握手第一步：core 的身份
+  std::cout << "[core ready] protocol=" << session->hello.value("protocol_version", "?")
+            << " core=" << session->hello.value("core_version", "?")
+            << " pid=" << session->hello.value("pid", 0) << "\n" << std::flush;
+
+  // 握手第二步：request hello（版本协商；成功响应即 welcome 语义）
+  const json welcome = session->call("hello",
+      json{{"protocol_version", proto::PROTOCOL_VERSION}, {"client_version", "0.0.1"}},
+      [](const json&) {});
   if (welcome.is_null() || !welcome.value("ok", false)) {
     std::cerr << "agent-cli: handshake rejected: " << welcome.dump() << "\n";
     return 1;
   }
   std::cout << "[handshake] ok\n" << std::flush;
 
-  // 主循环：用户一行 = 一个 echo 请求
-  std::string user_line;
-  while (std::getline(std::cin, user_line)) {
-    const std::string rid = "r" + std::to_string(++next_id);
-    write_frame(core_in, proto::frame_request(rid, "echo", json{{"line", user_line}}));
-    const json resp = wait_response(core_out, rid);
-    if (resp.is_null()) { std::cerr << "agent-cli: core died unexpectedly\n"; break; }
-    if (resp.value("ok", false)) {
-      std::cout << resp["result"].value("line", resp["result"].dump()) << "\n" << std::flush;
-    } else {
-      std::cout << "[error] " << resp["error"].value("code", "?") << ": "
-                << resp["error"].value("message", "?") << "\n" << std::flush;
+  // REPL：用户一行 = 一个 demo.chat 请求
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line.empty()) continue;
+    size_t deltas = 0;
+    bool prefix_printed = false;
+    const json resp = session->call("demo.chat", json{{"text", line}}, [&](const json& ev) {
+      if (ev.value("name", "") != "assistant.delta") return;
+      if (!prefix_printed) {
+        std::cout << "[assistant] " << std::flush;
+        prefix_printed = true;
+      }
+      std::cout << ev["payload"].value("text", "") << std::flush;  // 逐帧立刻输出 = 打字机
+      ++deltas;
+    });
+
+    if (resp.is_null()) {
+      std::cerr << "agent-cli: core died unexpectedly\n";
+      return 1;
     }
+    if (!resp.value("ok", false)) {
+      std::cout << "\n[error] " << resp["error"].value("code", "?") << ": "
+                << resp["error"].value("message", "?") << "\n" << std::flush;
+      continue;
+    }
+    std::cout << "\n[turn " << resp["result"].value("turn_id", "?") << " done: " << deltas
+              << " deltas, stop_reason=" << resp["result"].value("stop_reason", "?") << "]\n" << std::flush;
   }
 
-  // 收尾：协商关闭（protocol.md §4.2 shutdown）
-  const std::string sid = "r" + std::to_string(++next_id);
-  write_frame(core_in, proto::frame_request(sid, "shutdown", json::object()));
-  const json bye = wait_response(core_out, sid);
-  fclose(core_in);
-  int status = 0;
-  waitpid(pid, &status, 0);
-  if (!bye.is_null() && WIFEXITED(status)) {
-    std::cout << "[core exited cleanly, code=" << WEXITSTATUS(status) << "]\n";
-  }
+  const int code = session->shutdown();
+  std::cout << "[core exited cleanly, code=" << code << "]\n";
   return 0;
 }
