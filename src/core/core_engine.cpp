@@ -57,6 +57,12 @@ json CoreEngine::hello_payload() const {
               {"pid", static_cast<int64_t>(::getpid())}};
 }
 
+void CoreEngine::greet(const FrameSink& sink) {
+  const std::string frame = proto::frame_event(++seq_, "hello", hello_payload());
+  log('<', frame);
+  sink(frame);
+}
+
 void CoreEngine::log(char dir, const std::string& frame) {
   if (!log_.is_open()) return;
   std::string f = frame;
@@ -138,7 +144,7 @@ int CoreEngine::run(std::istream& in, std::ostream& out) {
   const auto emit = [&](const std::string& frame) { log('<', frame); raw_write(frame); };
 
   // 第一帧永远是 event hello（protocol.md §4.1）
-  emit(proto::frame_event(++seq_, "hello", hello_payload()));
+  greet(raw_write);
 
   std::string line;
   while (std::getline(in, line)) {

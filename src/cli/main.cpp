@@ -144,7 +144,11 @@ class PipeSession : public Session {
 class EmbeddedSession : public Session {
  public:
   explicit EmbeddedSession(core::Options opts) : engine_(std::move(opts)) {
-    hello = engine_.hello_payload();
+    // 握手第一步与管道模式走同一条路：解析 core 发出的 event hello（只换传输，不换语义）
+    engine_.greet([&](const std::string& frame) {
+      const json ev = proto::parse_frame(frame);
+      if (!ev.is_null() && ev.value("name", "") == "hello") hello = ev["payload"];
+    });
   }
 
   json call(const std::string& method, const json& params, const EventSink& on_event) override {

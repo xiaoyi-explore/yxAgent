@@ -5,6 +5,7 @@
     python3 tests/test_s2.py [agent-core] [agent-cli]
     python3 tests/test_s2.py --regen        # 重新生成 fixtures/demo_chat.ndjson（模型模板改动时用）
 """
+import difflib
 import json
 import re
 import subprocess
@@ -199,6 +200,21 @@ def test_embedded_equivalence():
     check("两轮都被处理（t2 结算行存在）", "[turn t2 done:" in pipe_out)
 
 
+def test_log_raw_equivalent_across_modes():
+    """两种模式的抓包应当逐行一致——这样 diff 抓包就等于 diff 行为。"""
+    with tempfile.TemporaryDirectory() as td:
+        pl = Path(td) / "pipe.log"
+        el = Path(td) / "emb.log"
+        run_cli(["--log-raw", str(pl)])
+        run_cli(["--embedded", "--log-raw", str(el)])
+        norm = lambda s: re.sub(r'"pid":\d+', '"pid":X', s)
+        a = norm(pl.read_text(encoding="utf-8"))
+        b = norm(el.read_text(encoding="utf-8"))
+        diff = "\n".join(list(difflib.unified_diff(a.splitlines(), b.splitlines(),
+                                              lineterm=""))[:10])
+        check("log-raw: 管道与 embedded 的抓包逐行一致（pid 除外）", a == b, diff)
+
+
 def test_streaming_is_incremental():
     delay = 15
     p = subprocess.Popen([CORE, "--demo-delay-ms=%d" % delay],
@@ -252,6 +268,7 @@ test_multiturn()
 test_log_raw()
 test_s1_regressions()
 test_embedded_equivalence()
+test_log_raw_equivalent_across_modes()
 test_streaming_is_incremental()
 test_golden_fixture()
 print()

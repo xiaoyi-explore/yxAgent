@@ -37,8 +37,13 @@ class CoreEngine {
   // 事件与响应都通过 sink 送出；sink 返回后本轮结束。
   void handle_request(const json& req, const FrameSink& sink);
 
-  // core 的身份（握手用）：管道模式从 event hello 里读，embedded 模式直接问引擎
+  // core 的身份（握手用）
   json hello_payload() const;
+
+  // 发出启动帧 event hello（并记入抓包）。
+  // 管道模式在 run() 开头调用；embedded 模式在握手时调用——
+  // 这样两种模式的握手路径与抓包内容**完全一致**，diff 抓包就等于 diff 行为。
+  void greet(const FrameSink& sink);
 
  private:
   void log(char dir, const std::string& frame);
