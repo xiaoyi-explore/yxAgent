@@ -46,6 +46,14 @@ S3a 只让 HTTP 通、只让 JSON 对、只让历史正确——**这三件事�
 命令行参数会出现在 `ps aux` / `/proc/<pid>/cmdline` 里，**同机任何用户都能看到**。
 所以：cli 不提供 `--api-key`，key 由环境变量继承给 core；core 保留 `--api-key` 兜底（测试/临时用）。
 
+### 决策 5b：为什么叫 `OpenAICompatProvider` 而不是 `DeepSeekProvider`
+
+- **代码依赖的是格式，不是厂商**：DeepSeek 选择说"OpenAI 兼容"这套线格式（同一个 `POST /chat/completions`、同样的 `choices[].message.content` / `usage` / `finish_reason`）。谁换 `--base-url` 都能连（本地假 server、vLLM、one-api 网关都验证过）。
+- **命名检验法**：如果一个类叫 `DeepSeekProvider`，却能连 vLLM，那名字就在骗人。`grep -rn deepseek src/` 的结果是——只出现在默认值与注释里，业务逻辑零处。
+- **端口与适配器**：`Provider` 是端口（不含 HTTP 类型），`OpenAICompatProvider` 是适配器，`CoreEngine` 只依赖端口。S3b 加流式只改适配器内部；将来接 Anthropic 这种**不同格式**时，正确做法是**新增适配器**，而不是在类里 `if (vendor == ...)`。
+- **"Compat" 是诚实的范围声明**：实现的是兼容**子集**（只 chat completions），不是 OpenAI 全家桶（embeddings/files/assistants）。
+- **何时才需要 DeepSeek 特有代码**：`deepseek-reasoner` 的 `reasoning_content`（思维链）、`/beta` 下的 FIM/前缀补全、厂商特有的 usage 字段——这些都属于适配器的活。
+
 ### 决策 5：分层铁律的执行方式变了——从"自觉"变成"测试"
 
 S2 时我们说"cli 源码不含 HTTP"，靠嘴说。S3a 起 provider 就在 `agent_core_lib` 里，
