@@ -180,6 +180,20 @@ def test_api_key_flag(base):
     kill(p)
 
 
+def test_ambiguous_config_warnings(base):
+    env = core_env()
+    env["OPENAI_API_KEY"] = "sk-another"
+    r = subprocess.run([CORE, "--base-url", base, "--model", "fake"], input="",
+                       capture_output=True, text=True, timeout=10, env=env)
+    check("两个 key 同时存在 -> 明确告警（不静默选一个）",
+          "both DEEPSEEK_API_KEY and OPENAI_API_KEY" in r.stderr, r.stderr)
+
+    r = subprocess.run([CORE, "--base-url", "http://127.0.0.1:1"], input="",
+                       capture_output=True, text=True, timeout=10, env=env)
+    check("非 deepseek 端点且未给 --model -> 明确告警",
+          "defaulting to deepseek-chat" in r.stderr, r.stderr)
+
+
 def test_cli(base, env):
     r = subprocess.run([CLI, "--base-url", base, "--model", "fake"],
                        input="你好\n第二句\n", capture_output=True, text=True, timeout=40, env=env)
@@ -219,6 +233,7 @@ def main():
         test_transport_failures(base)
         test_failed_turn_not_in_history(base)
         test_no_provider()
+        test_ambiguous_config_warnings(base)
         test_api_key_flag(base)
         test_cli(base, env)
         test_layering()

@@ -59,9 +59,23 @@ int main(int argc, char** argv) {
   }
 
   // key 优先 --api-key，其次环境变量。环境变量更安全：argv 对同机所有用户可见。
+  // 两个变量同时存在时，选谁都是陷阱——必须吵，不能静默选一个。
   if (opts.api_key.empty()) {
-    if (const char* k = std::getenv("DEEPSEEK_API_KEY")) opts.api_key = k;
-    else if (const char* k2 = std::getenv("OPENAI_API_KEY")) opts.api_key = k2;
+    const char* deepseek_key = std::getenv("DEEPSEEK_API_KEY");
+    const char* openai_key = std::getenv("OPENAI_API_KEY");
+    if (deepseek_key != nullptr && openai_key != nullptr && std::string(deepseek_key) != openai_key) {
+      std::cerr << "[core] warning: both DEEPSEEK_API_KEY and OPENAI_API_KEY are set and differ; using "
+                   "DEEPSEEK_API_KEY. Unset one, or pass --api-key explicitly.\n";
+    }
+    if (deepseek_key != nullptr) opts.api_key = deepseek_key;
+    else if (openai_key != nullptr) opts.api_key = openai_key;
+  }
+
+  // 模型名默认是 deepseek-chat；若端点指到别家，这会是一个静默的坑（OpenAI 会报 model not found）。
+  if (opts.model.empty() && !opts.base_url.empty() &&
+      opts.base_url.find("deepseek") == std::string::npos) {
+    std::cerr << "[core] warning: --model not given, defaulting to deepseek-chat; pass --model for "
+              << opts.base_url << " (e.g. gpt-4o-mini, qwen-max...)\n";
   }
 
   core::CoreEngine engine(std::move(opts));
