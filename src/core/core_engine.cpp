@@ -1,8 +1,11 @@
 #include "core/core_engine.hpp"
 
+#include "core/openai_compat.hpp"
+
 #include <chrono>
 #include <ctime>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -46,6 +49,16 @@ CoreEngine::CoreEngine(Options opts) : opts_(std::move(opts)) {
   if (!opts_.log_raw_path.empty()) {
     log_.open(opts_.log_raw_path, std::ios::out | std::ios::trunc);
     if (!log_) std::cerr << "[core] warning: cannot open log-raw file: " << opts_.log_raw_path << "\n";
+  }
+
+  // S3a：有 base_url 或 api_key 就建 provider；两者都没有 = 纯 demo 模式
+  const bool want_provider = !opts_.base_url.empty() || !opts_.api_key.empty();
+  if (want_provider) {
+    provider_ = std::make_unique<OpenAICompatProvider>(OpenAIConfig{
+        opts_.base_url.empty() ? "https://api.deepseek.com" : opts_.base_url,
+        opts_.api_key,
+        opts_.model.empty() ? "deepseek-chat" : opts_.model,
+        opts_.provider_timeout_ms});
   }
 }
 
@@ -127,6 +140,30 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
         std::this_thread::sleep_for(std::chrono::milliseconds(opts_.demo_delay_ms));
     }
     emit(proto::frame_response_ok(id, json{{"turn_id", turn_id}, {"text", reply}, {"stop_reason", "stop"}}));
+    return;
+  }
+
+  if (method == "chat") {
+    if (!provider_) {
+      send_err(id, "NO_PROVIDER",
+               "core has no model provider: start with --base-url https://api.deepseek.com --model deepseek-chat "
+               "and an api key in DEEPSEEK_API_KEY (or use --demo for the built-in fake model)");
+      return;
+    }
+    const std::string text = (params.contains("text") && params["text"].is_string())
+                               ? params["text"].get<std::string>() : "";
+    const int64_t turn = ++turn_;
+    const std::string turn_id = "t" + std::to_string(turn);
+    history_.push_back(Message{"user", text});
+    try {
+      const ChatResult r = provider_->chat(history_);
+      history_.push_back(Message{"assistant", r.text});
+      emit(proto::frame_response_ok(id, json{{"turn_id", turn_id}, {"text", r.text},
+                                             {"stop_reason", r.finish_reason}, {"usage", r.usage}}));
+    } catch (const std::exception& e) {
+      history_.pop_back();  // 失败的一轮不进历史：否则下一次请求会带着半截对话
+      send_err(id, "PROVIDER_ERROR", e.what());
+    }
     return;
   }
 

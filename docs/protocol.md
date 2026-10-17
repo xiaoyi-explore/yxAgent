@@ -92,7 +92,7 @@
 
 | 消息 | 引入阶段 | 一句话 |
 |---|---|---|
-| `user.message` / `turn.*` / 真 `assistant.delta` | S3 | 真模型对话 |
+| `user.message` / `turn.*` / 真 `assistant.delta` | S3b | 流式对话（S3a 的 `chat` 是非流式前身） |
 | `tool.call` / `tool.result` | S4 | 工具循环 |
 | `turn.cancel` | S5 | 取消 |
 | `context.compacted` | S6 | 压缩通知 |
@@ -265,3 +265,17 @@ cli ◄─response {turn_id, text, stop_reason} ───────── core
 
 为什么响应放最后，而不是先回一个 ack 再流式推送？见 `docs/stage-s2.md` 的决策记录——
 一句话：真实 LLM 也是"流完才知道结果"，先这样设计，S3 就不用再改协议形状。
+
+### S3a 追加：`chat` 方法与 Provider 抽象
+
+| 项 | 内容 |
+|---|---|
+| 请求 | `{"type":"request","id":"r2","method":"chat","params":{"text":"你好"}}` |
+| 响应 | `{"type":"response","id":"r2","ok":true,"result":{"turn_id":"t1","text":"…","stop_reason":"stop","usage":{"prompt_tokens":9,"completion_tokens":12,"total_tokens":21}}}` |
+| 语义 | core 调 OpenAI 兼容端点的 `POST /chat/completions`（`stream:false`），拿**整段**回复 |
+| 历史 | `messages` 数组由 **core** 维护（真相在 core）；失败的一轮不写入历史 |
+| 无事件 | 本阶段不产生任何 event（`assistant.delta` 是 S3b） |
+| 错误 | `NO_PROVIDER`：启动时没配模型端点；`PROVIDER_ERROR`：HTTP 错误 / 非 JSON / 超时 / 连接失败，message 必须可行动 |
+
+S3b 会把这里的 `stream:false` 改成 `true`，并让每个增量变成 `assistant.delta` 事件——
+**响应的形状不变**，仍然在本轮结束时结算（这就是 S2 定"响应迟到"的回报）。

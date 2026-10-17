@@ -45,6 +45,9 @@ class PipeSession : public Session {
     std::vector<std::string> args = {core_path};
     if (!opts.log_raw_path.empty()) args.push_back("--log-raw=" + opts.log_raw_path);
     args.push_back("--demo-delay-ms=" + std::to_string(opts.demo_delay_ms));
+    if (!opts.base_url.empty()) args.push_back("--base-url=" + opts.base_url);
+    if (!opts.model.empty()) args.push_back("--model=" + opts.model);
+    args.push_back("--provider-timeout-ms=" + std::to_string(opts.provider_timeout_ms));
 
     int to_core[2], from_core[2];
     if (::pipe(to_core) != 0 || ::pipe(from_core) != 0) throw std::runtime_error("pipe() failed");
@@ -181,15 +184,21 @@ class EmbeddedSession : public Session {
 // ============================ 命令行参数 ============================
 struct CliArgs {
   bool embedded = false;
+  bool demo = false;  // --demo：用 core 内置假模型（S2），否则用真模型 chat（S3a）
   std::string core_path;
   core::Options core_opts;
 };
 
 void usage() {
-  std::cerr << "usage: agent-cli [--embedded] [--log-raw FILE] [--demo-delay-ms N] [CORE_PATH]\n"
+  std::cerr << "usage: agent-cli [--demo] [--embedded] [--base-url URL] [--model NAME]\n"
+               "                  [--log-raw FILE] [--demo-delay-ms N] [--provider-timeout-ms N] [CORE_PATH]\n"
+               "  --demo              用内置假模型（离线，S2 的 demo.chat）\n"
                "  --embedded          不 spawn 子进程，同进程直连 core（调试利器）\n"
+               "  --base-url URL      真模型端点（默认 https://api.deepseek.com）\n"
+               "  --model NAME        模型名（默认 deepseek-chat）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
+               "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
                "  CORE_PATH           agent-core 的路径（默认与本程序同目录）\n";
 }
 
@@ -225,6 +234,11 @@ int main(int argc, char** argv) {
     const std::string a = argv[i];
     if (a == "--help" || a == "-h") { usage(); return 0; }
     else if (a == "--embedded") cli.embedded = true;
+    else if (a == "--demo") cli.demo = true;
+    else if (opt_value(argc, argv, i, "--base-url", v)) cli.core_opts.base_url = v;
+    else if (opt_value(argc, argv, i, "--model", v)) cli.core_opts.model = v;
+    else if (opt_value(argc, argv, i, "--provider-timeout-ms", v))
+      cli.core_opts.provider_timeout_ms = std::max(1, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
     else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
@@ -257,13 +271,14 @@ int main(int argc, char** argv) {
   }
   std::cout << "[handshake] ok\n" << std::flush;
 
-  // REPL：用户一行 = 一个 demo.chat 请求
+  // REPL：--demo 走 demo.chat（S2 的假流式），否则走 chat（S3a 的真模型，非流式）
+  const std::string method = cli.demo ? "demo.chat" : "chat";
   std::string line;
   while (std::getline(std::cin, line)) {
     if (line.empty()) continue;
     size_t deltas = 0;
     bool prefix_printed = false;
-    const json resp = session->call("demo.chat", json{{"text", line}}, [&](const json& ev) {
+    const json resp = session->call(method, json{{"text", line}}, [&](const json& ev) {
       if (ev.value("name", "") != "assistant.delta") return;
       if (!prefix_printed) {
         std::cout << "[assistant] " << std::flush;
@@ -282,8 +297,21 @@ int main(int argc, char** argv) {
                 << resp["error"].value("message", "?") << "\n" << std::flush;
       continue;
     }
-    std::cout << "\n[turn " << resp["result"].value("turn_id", "?") << " done: " << deltas
-              << " deltas, stop_reason=" << resp["result"].value("stop_reason", "?") << "]\n" << std::flush;
+    const json& res = resp["result"];
+    if (cli.demo) {
+      std::cout << "\n[turn " << res.value("turn_id", "?") << " done: " << deltas
+                << " deltas, stop_reason=" << res.value("stop_reason", "?") << "]\n" << std::flush;
+    } else {
+      std::cout << "[assistant] " << res.value("text", "") << "\n";
+      std::cout << "[turn " << res.value("turn_id", "?") << " done: stop_reason="
+                << res.value("stop_reason", "?");
+      if (res.contains("usage") && res["usage"].is_object()) {
+        const json& u = res["usage"];
+        std::cout << ", tokens=" << u.value("prompt_tokens", 0) << "/" << u.value("completion_tokens", 0)
+                  << "/" << u.value("total_tokens", 0);
+      }
+      std::cout << "]\n" << std::flush;
+    }
   }
 
   const int code = session->shutdown();

@@ -183,7 +183,7 @@ def test_s1_regressions():
 
 
 def run_cli(extra):
-    r = subprocess.run([CLI, "--demo-delay-ms=0", *extra],
+    r = subprocess.run([CLI, "--demo", "--demo-delay-ms=0", *extra],
                        input="你好\n第二句\n", capture_output=True, text=True, timeout=30)
     return r.stdout
 

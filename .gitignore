@@ -1,3 +1,5 @@
 build/
 *.log
 /compile_commands.json
+# model/ 里放的是 API key（本地秘密），永不提交
+/model/

@@ -8,9 +8,9 @@
 |---|---|---|---|
 | 按协议应答（hello/ping/echo/shutdown） | 协议语义属于 core | S1 | ✅ |
 | 假模型（demo.chat）—— S2 的可替换接缝 | 先让事件流跑通；S3 换成真 Provider，**帧形状不变** | S2 | ✅ |
-| HTTP 客户端接入（先非流式） | 前端不该知道 HTTP 的存在 | S3a | 🔜 |
+| HTTP 客户端接入（先非流式） | 前端不该知道 HTTP 的存在 | S3a | ✅ |
 | SSE 流式解析 | 分片边界、码点切断、重试都发生在 core | S3b | 🔜 |
-| 消息历史（真相状态） | 换前端不丢对话 | S3a | 🔜 |
+| 消息历史（真相状态） | 换前端不丢对话 | S3a | ✅ |
 | 工具注册表与执行 | 权限判定必须和执行同进程 | S4 | 🔜 |
 | Agent 循环（turn 状态机） | 循环是协议语义，不是 UI 语义 | S4 | 🔜 |
 | 取消与节流 | 取消要穿透到 HTTP 层 | S5 | 🔜 |
@@ -34,9 +34,10 @@
 1. `agent_common` 绝不链接 HTTP 库或 TUI 库。
 2. core 从不向前端发"渲染结果"，只发结构化事件。
 3. 前端不认识 HTTP / 工具 / 上下文这些词。
-4. **已登记的例外**：`--embedded` 让 `agent-cli` 链接了 `agent_core_lib`（S2 引入，Codex 同款做法）。
-   cli 的**源码**仍然不 include 任何 HTTP/TUI 头文件——例外只发生在链接行。S3 接入 HTTP 时，
-   必须把 Provider 挡在 core 内部（`agent_core_lib` 不依赖 httplib），否则铁律会被悄悄侵蚀。
+4. **已登记的例外**：`--embedded` 让 `agent-cli` 在链接层面拿到 `agent_core_lib`，
+   S3a 起这个库里含 httplib + OpenSSL（Codex 的同款做法：InProcessAppServerClient 也一样）。
+   **源码层面的铁律不变**：`src/cli/` 里不得出现 httplib / openssl / ftxui。
+   这一条不靠自觉，靠测试：`tests/test_s3a.py::test_layering` 会扫源码，违反就红。
 
 ## S1 代码地图
 
@@ -45,3 +46,14 @@
 | `src/common/protocol.hpp` | ~60 | 构帧工厂 + 解帧 + 版本比较（header-only，零依赖 nlohmann/json 之外的东西） |
 | `src/core/main.cpp` | ~70 | 第一帧 event hello → 读循环 → 方法分发 → flush 退出 |
 | `src/cli/main.cpp` | ~100 | fork+双管道 spawn → 握手 → echo 主循环 → shutdown 收尾 |
+
+## S3a 代码地图
+
+| 文件 | 行数级 | 内容 |
+|---|---|---|
+| `src/core/provider.hpp` | ~45 | `Message` / `ChatResult` / `Provider` 接口 / `ProviderError`（无 HTTP 依赖） |
+| `src/core/openai_compat.hpp/.cpp` | ~30 / ~120 | OpenAI 兼容客户端：拆 base_url、POST、状态码与 JSON 校验 |
+| `src/core/core_engine.cpp` | +40 | `chat` 方法：历史维护、失败回滚、统一 `PROVIDER_ERROR` |
+| `third_party/httplib.h` | vendored | cpp-httplib v0.18.3 单头文件（含 OpenSSL 支持） |
+| `tests/fake_llm.py` | ~90 | 假 LLM server：200 / 401 / 500 / 非 JSON / 慢 / failonce 六种路径 |
+| `tests/test_s3a.py` | ~230 | 成功、多轮、错误映射、超时、失败回滚、cli e2e、分层铁律 |

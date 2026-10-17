@@ -12,10 +12,21 @@ endif()
 add_library(agent_common INTERFACE)
 target_include_directories(agent_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# core 引擎：agent-core 与 agent-cli(--embedded) 共用的那份逻辑。
-# 注意：--embedded 让 cli 链接了 core 库，这是刻意的例外，理由见 docs/stage-s2.md。
-add_library(agent_core_lib STATIC src/core/core_engine.cpp)
-target_link_libraries(agent_core_lib PUBLIC agent_common)
+# httplib（vendored 单头文件） + OpenSSL：只属于 core 的 provider（S3a 引入）。
+add_library(httplib INTERFACE)
+target_include_directories(httplib INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_compile_definitions(httplib INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+
+# core 引擎：agent-core 与 agent-cli(--embedded) 共用。
+# --embedded 让 cli 在**链接层面**拿到 core（含 provider）——刻意的例外；
+# 源码层面的铁律由 tests/test_s3a.py 的 layering 检查守着（cli 源码不得 include httplib/openssl）。
+add_library(agent_core_lib STATIC
+  src/core/core_engine.cpp
+  src/core/openai_compat.cpp)
+target_link_libraries(agent_core_lib PUBLIC agent_common httplib
+                                      OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
 add_executable(agent-core src/core/main.cpp)
 target_link_libraries(agent-core PRIVATE agent_core_lib)
@@ -28,3 +39,5 @@ add_test(NAME s1_handshake
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s1.py $<TARGET_FILE:agent-core>)
 add_test(NAME s2_stream
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s2.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)
+add_test(NAME s3a_provider
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s3a.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)

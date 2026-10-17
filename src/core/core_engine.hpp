@@ -5,13 +5,16 @@
 //   引擎不关心自己跑在哪个进程里。run() 时帧写到 stdout；--embedded 时帧交给 cli 的回调。
 //   "同进程直连"的全部秘密就是：把"写出到管道"换成"调用函数"。
 #include "common/protocol.hpp"
+#include "core/provider.hpp"
 
 #include <cstdint>
 #include <fstream>
 #include <functional>
 #include <istream>
+#include <memory>
 #include <ostream>
 #include <string>
+#include <vector>
 
 namespace core {
 
@@ -23,6 +26,12 @@ using FrameSink = std::function<void(const std::string& frame)>;
 struct Options {
   std::string log_raw_path;  // 空 = 不抓包。抓包格式：每行 --> 或 <-- 加原样一帧
   int demo_delay_ms = 30;    // 假模型的"打字"速度；0 = 全速（测试与 embedded 对比用）
+
+  // —— S3a：真模型（非流式）——
+  std::string base_url;          // 空 = 不建 provider（纯 demo 模式）
+  std::string api_key;           // 只从环境变量/参数来，绝不进仓库
+  std::string model;             // 空时默认 deepseek-chat
+  int provider_timeout_ms = 120000;
 };
 
 class CoreEngine {
@@ -50,6 +59,8 @@ class CoreEngine {
 
   Options opts_;
   std::ofstream log_;
+  std::unique_ptr<Provider> provider_;  // 空 = 没有真模型（chat 会回 NO_PROVIDER）
+  std::vector<Message> history_;        // 消息历史（真相在 core）；S6 压缩、S7 落盘都从它来
   int64_t seq_ = 0;   // 事件序列号：从 1 开始、严格递增、无空洞（protocol.md §2.3）
   int64_t turn_ = 0;  // 第几轮对话（S2 只有 turn 这个概念，S3 会长大）
   bool shutdown_requested_ = false;

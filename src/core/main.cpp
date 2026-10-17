@@ -13,8 +13,13 @@ namespace {
 
 void usage() {
   std::cerr << "usage: agent-core [--log-raw FILE] [--demo-delay-ms N]\n"
+               "                  [--base-url URL] [--model NAME] [--api-key KEY] [--provider-timeout-ms N]\n"
                "  --log-raw FILE      把双向每一帧记到文件（--> 去向 core，<-- 来自 core）\n"
-               "  --demo-delay-ms N   假模型每吐一个字等待的毫秒数（默认 30，0 = 全速）\n";
+               "  --demo-delay-ms N   假模型每吐一个字等待的毫秒数（默认 30，0 = 全速）\n"
+               "  --base-url URL      模型端点（默认 https://api.deepseek.com）\n"
+               "  --model NAME        模型名（默认 deepseek-chat）\n"
+               "  --api-key KEY       API key；更安全的方式是环境变量 DEEPSEEK_API_KEY（argv 在 ps 里可见）\n"
+               "  --provider-timeout-ms N  读超时（默认 120000）\n";
 }
 
 // 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
@@ -45,7 +50,18 @@ int main(int argc, char** argv) {
     if (a == "--help" || a == "-h") { usage(); return 0; }
     else if (opt_value(argc, argv, i, "--log-raw", v)) opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
+    else if (opt_value(argc, argv, i, "--base-url", v)) opts.base_url = v;
+    else if (opt_value(argc, argv, i, "--model", v)) opts.model = v;
+    else if (opt_value(argc, argv, i, "--api-key", v)) opts.api_key = v;
+    else if (opt_value(argc, argv, i, "--provider-timeout-ms", v))
+      opts.provider_timeout_ms = std::max(1, std::atoi(v.c_str()));
     else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
+  }
+
+  // key 优先 --api-key，其次环境变量。环境变量更安全：argv 对同机所有用户可见。
+  if (opts.api_key.empty()) {
+    if (const char* k = std::getenv("DEEPSEEK_API_KEY")) opts.api_key = k;
+    else if (const char* k2 = std::getenv("OPENAI_API_KEY")) opts.api_key = k2;
   }
 
   core::CoreEngine engine(std::move(opts));
