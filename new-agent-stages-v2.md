@@ -335,6 +335,8 @@ screen.Post([&]{ messages.push_back(msg); });   // 任务在主循环线程执�
 4. `docs/responsibilities.md` 若职责有变则更新。
 5. 打 tag，README「学习路径」表登记。
 6. **写一句"本阶段我调试时最痛的一件事"**——这是你私人的、最值钱的笔记。
+7. 更新 `docs/HANDOFF.md`（进度真相：现在在哪、下一步、怎么验证）——给"下一个会话的你"看。
+8. 写/更新 `docs/stage-sN.md`（为什么这么设计、替代方案、踩了什么坑）。
 
 ---
 
