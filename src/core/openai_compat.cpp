@@ -2,8 +2,13 @@
 
 #include <httplib.h>
 
+#include <algorithm>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <utility>
+
+#include "core/sse.hpp"
 
 namespace core {
 namespace {
@@ -40,39 +45,27 @@ std::string snippet(const std::string& s, size_t n = 300) {
   return s.substr(0, n) + "...";
 }
 
-}  // namespace
+// 可重试 = **传输层**失败（连不上 / 连接被掐断 / 读超时），也就是"这一个请求根本没落地"。
+// 为什么 5xx 不重试：S3a 已经把契约写成"一次请求 = 一次尝试"（tests/test_s3a.py 的 failonce
+// 用例靠它测"失败的一轮不回灌历史"）。状态码级的重试策略属于 S5 的取消/重试，不在这里偷偷做。
+struct RetryableError : ProviderError {
+  explicit RetryableError(const std::string& what) : ProviderError(what) {}
+};
 
-OpenAICompatProvider::OpenAICompatProvider(OpenAIConfig cfg) : cfg_(std::move(cfg)) {}
-
-ChatResult OpenAICompatProvider::chat(const std::vector<Message>& messages) {
-  if (cfg_.model.empty()) throw ProviderError("no model configured (pass --model, e.g. deepseek-chat)");
-  if (cfg_.api_key.empty())
-    throw ProviderError("no api key (set DEEPSEEK_API_KEY in the environment, or pass --api-key)");
-
-  const Endpoint ep = parse_endpoint(cfg_.base_url);
-  httplib::Client cli(ep.origin);
-  // 连接与读取分开设：连不上要快失败，读（模型思考）可以慢
-  cli.set_connection_timeout(10, 0);
-  cli.set_read_timeout(cfg_.timeout_ms / 1000, (cfg_.timeout_ms % 1000) * 1000);
-  cli.set_follow_location(true);
-
-  json body = {{"model", cfg_.model}, {"stream", false}, {"messages", json::array()}};
+json make_body(const OpenAIConfig& cfg, const std::vector<Message>& messages, bool stream) {
+  json body = {{"model", cfg.model}, {"stream", stream}, {"messages", json::array()}};
   for (const auto& m : messages) body["messages"].push_back({{"role", m.role}, {"content", m.content}});
+  // OpenAI 的流式默认**不带** usage，要显式开口（docs/protocol.md §9 S3b）
+  if (stream) body["stream_options"] = {{"include_usage", true}};
+  return body;
+}
 
-  const httplib::Headers headers = {{"Authorization", "Bearer " + cfg_.api_key}};
-  const auto res = cli.Post(ep.path, headers, body.dump(), "application/json");
-  if (!res) {
-    throw ProviderError("HTTP transport error: " + httplib::to_string(res.error()) + " (" + ep.origin + ep.path + ")");
-  }
-  if (res->status != 200) {
-    throw ProviderError("HTTP " + std::to_string(res->status) + " from " + ep.origin + ep.path + ": " +
-                        snippet(res->body));
-  }
-
-  const json j = json::parse(res->body, nullptr, false);
-  if (j.is_discarded()) throw ProviderError("response is not JSON: " + snippet(res->body));
+// 整段 JSON 回复 -> ChatResult。S3a 的路径；S3b 的"非流式回退"也走这里。
+ChatResult parse_completion_body(const std::string& body) {
+  const json j = json::parse(body, nullptr, false);
+  if (j.is_discarded()) throw ProviderError("response is not JSON: " + snippet(body));
   if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty())
-    throw ProviderError("response has no choices: " + snippet(res->body));
+    throw ProviderError("response has no choices: " + snippet(body));
 
   const json& c0 = j["choices"][0];
   ChatResult r;
@@ -81,6 +74,147 @@ ChatResult OpenAICompatProvider::chat(const std::vector<Message>& messages) {
   r.finish_reason = c0.value("finish_reason", "");
   if (j.contains("usage") && j["usage"].is_object()) r.usage = j["usage"];
   return r;
+}
+
+// 连接与读取分开设：连不上要快失败，读（模型思考 / 慢速流）可以慢
+void setup_client(httplib::Client& cli, const OpenAIConfig& cfg) {
+  cli.set_connection_timeout(10, 0);
+  cli.set_read_timeout(cfg.timeout_ms / 1000, (cfg.timeout_ms % 1000) * 1000);
+  cli.set_follow_location(true);
+}
+
+// 非流式回退时最多攒这么多字节（足够容纳一整段回复；SSE 路径下 raw 在第一帧后就不再增长）
+constexpr size_t kFallbackCap = 1u << 20;
+
+}  // namespace
+
+OpenAICompatProvider::OpenAICompatProvider(OpenAIConfig cfg) : cfg_(std::move(cfg)) {}
+
+void OpenAICompatProvider::require_credentials() const {
+  if (cfg_.model.empty()) throw ProviderError("no model configured (pass --model, e.g. deepseek-chat)");
+  if (cfg_.api_key.empty())
+    throw ProviderError("no api key (set DEEPSEEK_API_KEY in the environment, or pass --api-key)");
+}
+
+ChatResult OpenAICompatProvider::chat(const std::vector<Message>& messages) {
+  require_credentials();
+  const Endpoint ep = parse_endpoint(cfg_.base_url);
+
+  httplib::Client cli(ep.origin);
+  setup_client(cli, cfg_);
+
+  const httplib::Headers headers = {{"Authorization", "Bearer " + cfg_.api_key}};
+  const auto res = cli.Post(ep.path, headers, make_body(cfg_, messages, false).dump(), "application/json");
+  if (!res) {
+    throw ProviderError("HTTP transport error: " + httplib::to_string(res.error()) + " (" + ep.origin + ep.path + ")");
+  }
+  if (res->status != 200) {
+    throw ProviderError("HTTP " + std::to_string(res->status) + " from " + ep.origin + ep.path + ": " +
+                        snippet(res->body));
+  }
+  return parse_completion_body(res->body);
+}
+
+ChatResult OpenAICompatProvider::chat_stream(const std::vector<Message>& messages, const DeltaSink& on_delta) {
+  require_credentials();
+  const Endpoint ep = parse_endpoint(cfg_.base_url);
+  const std::string body = make_body(cfg_, messages, true).dump();
+  const int attempts = std::max(1, cfg_.max_attempts);
+
+  bool emitted = false;  // 已经交给前端增量了吗？——决定重试安不安全
+  for (int attempt = 1;; ++attempt) {
+    try {
+      return stream_once(ep.origin, ep.path, body, on_delta, emitted);
+    } catch (const RetryableError& e) {
+      // 吐过字就不重试：用户会看到重复的半句话，比报错更糟
+      if (emitted || attempt >= attempts) throw ProviderError(e.what());
+      std::this_thread::sleep_for(std::chrono::milliseconds(120 * attempt));  // 简单退避
+    }
+  }
+}
+
+ChatResult OpenAICompatProvider::stream_once(const std::string& origin, const std::string& path,
+                                             const std::string& body, const DeltaSink& on_delta,
+                                             bool& emitted) {
+  httplib::Client cli(origin);
+  setup_client(cli, cfg_);
+
+  ChatResult out;
+  std::string raw;           // 开头若干字节：错误正文、非流式回退都要看它
+  std::string stream_error;  // 网关在流里插的 {"error":...}
+  bool saw_json = false;     // 收到过合法的 SSE JSON 事件 = 对端确实在按 SSE 说话
+
+  SseParser parser([&](const SseEvent& ev) {
+    if (ev.data.empty()) return;
+    if (ev.data == "[DONE]") return;  // 流结束标记：后面不再有 JSON
+
+    const json j = json::parse(ev.data, nullptr, false);
+    if (j.is_discarded()) return;  // 不是 JSON 的 data 行：忽略（容忍网关插播的杂音）
+    saw_json = true;
+
+    if (j.contains("error") && j["error"].is_object() && stream_error.empty())
+      stream_error = "model returned an error event: " + snippet(j["error"].dump());
+    if (j.contains("usage") && j["usage"].is_object()) out.usage = j["usage"];  // include_usage 的那一帧
+    if (!j.contains("choices") || !j["choices"].is_array()) return;
+
+    for (const json& c : j["choices"]) {
+      if (!c.is_object()) continue;
+      if (c.contains("delta") && c["delta"].is_object()) {
+        const json& d = c["delta"];
+        if (d.contains("content") && d["content"].is_string()) {
+          const std::string piece = d["content"].get<std::string>();
+          if (!piece.empty()) {
+            out.text += piece;  // 结算 = 增量的顺序拼接（protocol.md §9 不变量 2）
+            emitted = true;
+            if (on_delta) on_delta(piece);
+          }
+        }
+      }
+      if (c.contains("finish_reason") && c["finish_reason"].is_string())
+        out.finish_reason = c["finish_reason"].get<std::string>();
+    }
+  });
+
+  // 坑（S3b 踩过）：cpp-httplib 的 **Client::Post 没有 ContentReceiver 重载**——
+  // 只有 Get 有。想"边收边解析"必须自己拼一个 Request，把回调塞进 req.content_receiver，
+  // 再走 send(req, res, err)。写成 cli.Post(..., receiver) 会变成编译错误。
+  httplib::Request req;
+  req.method = "POST";
+  req.path = path;
+  req.body = body;
+  req.set_header("Authorization", "Bearer " + cfg_.api_key);
+  req.set_header("Accept", "text/event-stream");
+  req.set_header("Content-Type", "application/json");
+  req.content_receiver = [&](const char* data, size_t len, uint64_t /*offset*/, uint64_t /*total*/) {
+    parser.feed(data, len);
+    if (!saw_json && raw.size() < kFallbackCap)
+      raw.append(data, std::min(len, kFallbackCap - raw.size()));
+    return true;
+  };
+
+  httplib::Response res;
+  httplib::Error err = httplib::Error::Success;
+  const bool sent = cli.send(req, res, err);
+  parser.flush();  // 对端可能断在一个事件中间：把已经完整的部分结算掉
+
+  if (!sent) {
+    throw RetryableError("HTTP transport error: " + httplib::to_string(err) + " (" + origin + path + ")");
+  }
+  if (res.status != 200) {
+    const std::string detail = raw.empty() ? res.body : raw;
+    throw ProviderError("HTTP " + std::to_string(res.status) + " from " + origin + path + ": " +
+                        snippet(detail));
+  }
+  if (!stream_error.empty()) throw ProviderError(stream_error);
+
+  if (!saw_json) {
+    // 对端无视了 stream:true，直接回一整段 JSON —— 回退到 S3a 的解析（没有增量，结果一样）
+    ChatResult r = parse_completion_body(raw.empty() ? res.body : raw);
+    if (!r.text.empty() && on_delta) on_delta(r.text);
+    if (!r.text.empty()) emitted = true;
+    return r;
+  }
+  return out;
 }
 
 }  // namespace core

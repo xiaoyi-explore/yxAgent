@@ -27,11 +27,16 @@ struct Options {
   std::string log_raw_path;  // 空 = 不抓包。抓包格式：每行 --> 或 <-- 加原样一帧
   int demo_delay_ms = 30;    // 假模型的"打字"速度；0 = 全速（测试与 embedded 对比用）
 
-  // —— S3a：真模型（非流式）——
+  // —— S3a：真模型 ——
   std::string base_url;          // 空 = 不建 provider（纯 demo 模式）
   std::string api_key;           // 只从环境变量/参数来，绝不进仓库
   std::string model;             // 空时默认 deepseek-chat
   int provider_timeout_ms = 120000;
+
+  // —— S3b：真·流式 ——
+  // true（默认）= chat 走 chat_stream()，每个增量立刻变成 assistant.delta；
+  // false = 回到 S3a 的"一次性整段返回"（--no-stream；排查"是流式坏了还是模型坏了"用）。
+  bool stream = true;
 };
 
 class CoreEngine {

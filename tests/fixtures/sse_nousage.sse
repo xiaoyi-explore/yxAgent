@@ -1,0 +1,8 @@
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{"content":"fake({{MSGS}} msgs)"}}]}
+
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{"content":" echo={{ECHO}}"}}]}
+
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

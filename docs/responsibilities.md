@@ -9,7 +9,7 @@
 | 按协议应答（hello/ping/echo/shutdown） | 协议语义属于 core | S1 | ✅ |
 | 假模型（demo.chat）—— S2 的可替换接缝 | 先让事件流跑通；S3 换成真 Provider，**帧形状不变** | S2 | ✅ |
 | HTTP 客户端接入（先非流式） | 前端不该知道 HTTP 的存在 | S3a | ✅ |
-| SSE 流式解析 | 分片边界、码点切断、重试都发生在 core | S3b | 🔜 |
+| SSE 流式解析（`chat` 的真增量） | 分片边界、码点切断、重试都发生在 core | S3b | ✅ |
 | 消息历史（真相状态） | 换前端不丢对话 | S3a | ✅ |
 | 工具注册表与执行 | 权限判定必须和执行同进程 | S4 | 🔜 |
 | Agent 循环（turn 状态机） | 循环是协议语义，不是 UI 语义 | S4 | 🔜 |
@@ -38,6 +38,10 @@
    S3a 起这个库里含 httplib + OpenSSL（Codex 的同款做法：InProcessAppServerClient 也一样）。
    **源码层面的铁律不变**：`src/cli/` 里不得出现 httplib / openssl / ftxui。
    这一条不靠自觉，靠测试：`tests/test_s3a.py::test_layering` 会扫源码，违反就红。
+5. **HTTP 只准出现在 `src/core/openai_compat.cpp` 一处。**
+   `src/core/sse.*` 是纯字节解析，不认识 HTTP（连带不知道 OpenAI）；
+   它甚至**不链接** httplib/OpenSSL——`sse_parser_test` 这个构建目标就是证据，
+   `tests/test_s3b.py::test_layering` 再扫一遍源码。
 
 ## S1 代码地图
 
@@ -57,3 +61,16 @@
 | `third_party/httplib.h` | vendored | cpp-httplib v0.18.3 单头文件（含 OpenSSL 支持） |
 | `tests/fake_llm.py` | ~90 | 假 LLM server：200 / 401 / 500 / 非 JSON / 慢 / failonce 六种路径 |
 | `tests/test_s3a.py` | ~230 | 成功、多轮、错误映射、超时、失败回滚、cli e2e、分层铁律 |
+## S3b 代码地图
+
+| 文件 | 行数级 | 内容 |
+|---|---|---|
+| `src/core/sse.hpp/.cpp` | ~80 / ~100 | SSE 增量解析器：按行缓冲 → 空行派发 → 多行 data 拼接 → 注释行忽略；`flush()` 收拾没有空行收尾的最后一段。**不 include 任何网络库** |
+| `src/core/provider.hpp` | +15 | `DeltaSink`；`chat_stream()`（默认实现退化成整段一次吐）；`supports_stream()` |
+| `src/core/openai_compat.hpp/.cpp` | ~55 / ~230 | `stream` 开关与 `max_attempts`；`chat_stream()`：拼 `Request`（httplib 的 Post 没有流式重载）→ 边收边喂解析器 → 状态码/断连/非 SSE 回退；只重试传输层失败 |
+| `src/core/core_engine.cpp` | +10 | `chat` 里把增量 emit 成 `assistant.delta`；响应形状不变 |
+| `src/core/main.cpp` + `src/cli/main.cpp` | +5 / +12 | `--stream/--no-stream` 透传；cli 不再在结算时重播整段 |
+| `tests/sse_parser_test.cpp` | ~150 | **穷举切点**单元测试（1 字节一喂 … 一次喂完，含 CRLF 变体）；只链接 `sse.cpp` |
+| `tests/fake_llm_sse.py` | ~180 | 假 SSE server：自然切块 / 切在 JSON 中间 / 切在码点中间 / 注释行 / 慢流 / 断连 / 401·429·500 / 掐断连接 / 无 usage / 无 `[DONE]` |
+| `tests/fixtures/sse_*.sse` | 4 个文件 | 可读的字节级 fixture（`{{MSGS}}`/`{{ECHO}}` 占位符由假 server 渲染） |
+| `tests/test_s3b.py` | ~330 | 74 项检查：六条 fixture + 断连 + 重试 + 两条回退路径 + cli e2e + 铁律 |

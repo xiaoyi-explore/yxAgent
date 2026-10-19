@@ -29,7 +29,7 @@ std::vector<std::string> split_utf8_codepoints(const std::string& s) {
     if ((c & 0x80) == 0x00)      len = 1;  // 0xxxxxxx：ASCII
     else if ((c & 0xE0) == 0xC0) len = 2;
     else if ((c & 0xF0) == 0xE0) len = 3;
-    else if ((c & 0xF8) == 0xF0) len = 4;
+    else if ((c & 0xF8) == 0xF0) len = 4;  // 注意是F8，通过连续的1和后面的一个0来进行判断的
     else                         len = 1;  // 非法起始字节：原样单字节吐，绝不卡死
     if (i + len > s.size())      len = 1;  // 被截断的序列：同样单字节吐
     out.push_back(s.substr(i, len));
@@ -155,8 +155,14 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
     const int64_t turn = ++turn_;
     const std::string turn_id = "t" + std::to_string(turn);
     history_.push_back(Message{"user", text});
+    // S3b：流式时每个增量立刻变成一个 assistant.delta（帧形状 S2 就定死了，前端一行都不用改）。
+    // 顺序：delta 必须在本轮 response **之前**发完，response 永远是最后一帧（protocol.md §9 不变量 1）。
+    const bool use_stream = opts_.stream && provider_->supports_stream();
+    const auto on_delta = [&](const std::string& piece) {
+      emit(proto::frame_event(++seq_, "assistant.delta", json{{"turn_id", turn_id}, {"text", piece}}));
+    };
     try {
-      const ChatResult r = provider_->chat(history_);
+      const ChatResult r = use_stream ? provider_->chat_stream(history_, on_delta) : provider_->chat(history_);
       history_.push_back(Message{"assistant", r.text});
       emit(proto::frame_response_ok(id, json{{"turn_id", turn_id}, {"text", r.text},
                                              {"stop_reason", r.finish_reason}, {"usage", r.usage}}));

@@ -48,6 +48,7 @@ class PipeSession : public Session {
     if (!opts.base_url.empty()) args.push_back("--base-url=" + opts.base_url);
     if (!opts.model.empty()) args.push_back("--model=" + opts.model);
     args.push_back("--provider-timeout-ms=" + std::to_string(opts.provider_timeout_ms));
+    args.push_back(opts.stream ? "--stream=true" : "--stream=false");  // S3b：流式与否由 core 决定
 
     int to_core[2], from_core[2];
     if (::pipe(to_core) != 0 || ::pipe(from_core) != 0) throw std::runtime_error("pipe() failed");
@@ -196,6 +197,7 @@ void usage() {
                "  --embedded          不 spawn 子进程，同进程直连 core（调试利器）\n"
                "  --base-url URL      真模型端点（默认 https://api.deepseek.com）\n"
                "  --model NAME        模型名（默认 deepseek-chat）\n"
+               "  --no-stream         透传给 core：不用 SSE（回到 S3a 的整段返回）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
                "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
@@ -239,6 +241,8 @@ int main(int argc, char** argv) {
     else if (opt_value(argc, argv, i, "--model", v)) cli.core_opts.model = v;
     else if (opt_value(argc, argv, i, "--provider-timeout-ms", v))
       cli.core_opts.provider_timeout_ms = std::max(1, std::atoi(v.c_str()));
+    else if (a == "--no-stream") cli.core_opts.stream = false;
+    else if (a == "--stream") cli.core_opts.stream = true;
     else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
     else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
@@ -271,7 +275,7 @@ int main(int argc, char** argv) {
   }
   std::cout << "[handshake] ok\n" << std::flush;
 
-  // REPL：--demo 走 demo.chat（S2 的假流式），否则走 chat（S3a 的真模型，非流式）
+  // REPL：--demo 走 demo.chat（S2 的假流式），否则走 chat（S3a 的真模型；S3b 起默认流式）
   const std::string method = cli.demo ? "demo.chat" : "chat";
   std::string line;
   while (std::getline(std::cin, line)) {
@@ -302,7 +306,10 @@ int main(int argc, char** argv) {
       std::cout << "\n[turn " << res.value("turn_id", "?") << " done: " << deltas
                 << " deltas, stop_reason=" << res.value("stop_reason", "?") << "]\n" << std::flush;
     } else {
-      std::cout << "[assistant] " << res.value("text", "") << "\n";
+      // S3b：流式时文字已经一个增量一个增量吐出来了，这里只换行；
+      // 非流式（--no-stream / 对端无视 stream:true）才整段打印一次。
+      if (deltas == 0) std::cout << "[assistant] " << res.value("text", "") << "\n";
+      else std::cout << "\n";
       std::cout << "[turn " << res.value("turn_id", "?") << " done: stop_reason="
                 << res.value("stop_reason", "?");
       if (res.contains("usage") && res["usage"].is_object()) {

@@ -277,5 +277,43 @@ cli ◄─response {turn_id, text, stop_reason} ───────── core
 | 无事件 | 本阶段不产生任何 event（`assistant.delta` 是 S3b） |
 | 错误 | `NO_PROVIDER`：启动时没配模型端点；`PROVIDER_ERROR`：HTTP 错误 / 非 JSON / 超时 / 连接失败，message 必须可行动 |
 
-S3b 会把这里的 `stream:false` 改成 `true`，并让每个增量变成 `assistant.delta` 事件——
-**响应的形状不变**，仍然在本轮结束时结算（这就是 S2 定"响应迟到"的回报）。
+S3b 已经把这里的 `stream:false` 改成了 `true`，并让每个增量变成 `assistant.delta` 事件——
+**响应的形状没变**，仍然在本轮结束时结算（这就是 S2 定"响应迟到"的回报）。
+
+### S3b 追加：`chat` 变成流式（SSE）
+
+`stream:false` → `stream:true`，`chat` 长出了 `assistant.delta`，**请求与响应的字段一个字没改**。
+
+```
+cli ──request chat {text} ───────────────────────────────► core
+cli ◄─event assistant.delta {turn_id, text} ───────────── core   seq=N    ← 每收到一段 SSE 就发
+cli ◄─event assistant.delta {turn_id, text} ───────────── core   seq=N+1
+cli ◄─response {turn_id, text, stop_reason, usage} ────── core            ← 流结束后才结算
+```
+
+| 项 | 内容 |
+|---|---|
+| 请求 | `{"type":"request","id":"r2","method":"chat","params":{"text":"你好"}}`（与 S3a 相同） |
+| 事件 | `{"type":"event","seq":2,"name":"assistant.delta","payload":{"turn_id":"t1","text":"我是"}}` |
+| 响应 | 与 S3a 相同：`{"type":"response","id":"r2","ok":true,"result":{"turn_id":"t1","text":"…","stop_reason":"stop","usage":{…}}}` |
+| **不变量 1** | response 仍是本轮**最后一帧**（S2 定的，S3b 不改） |
+| **不变量 2** | `result.text` 恒等于本轮所有 `assistant.delta.text` 的顺序拼接 |
+| **不变量 3** | 每个 delta 的 `text` 是**完整的 UTF-8 字符串**（绝不含半个码点）。它与 S2 那条的差别：`demo.chat` 是"一个 delta 恰好一个码点"，`chat` 的 delta 是模型给的一段（可能几个字），前端只需按字符串追加 |
+| 上游 | core 对 OpenAI 兼容端点发 `stream:true` + `stream_options.include_usage`，按 SSE 增量解析 |
+| 回退 | 对端无视 `stream:true`、直接回整段 JSON 时，core 自动按非流式解析：**整段文本作为一个 delta**，行为等同 S3a |
+| 开关 | `agent-core --no-stream` / `agent-cli --no-stream` → 完全回到 S3a 的整段返回 |
+| 错误 | 仍只用 `PROVIDER_ERROR`（状态码 / 非 JSON / 超时 / 连接失败 / 流中途断开），message 必须可行动 |
+| 重试 | 只重试**传输层**失败（请求没落地），且仅当本轮**还没吐过任何 delta**；吐过字不许重试（会重复输出） |
+| fixture | `tests/fixtures/sse_basic.sse` / `sse_comment.sse` / `sse_nousage.sse` / `sse_nodone.sse`（由 `tests/fake_llm_sse.py` 回放） |
+
+**SSE 与我们的 NDJSON 对照**（同一个"分帧"问题，两种答案）：
+
+| | 我们的行协议 | 上游 SSE |
+|---|---|---|
+| 一帧的边界 | 换行 `\n` | **空行** |
+| 载荷前缀 | 无 | `data: `（多行 data 用换行拼接） |
+| 心跳 | 无 | `: ` 开头的注释行 |
+| 结束标记 | 对端关闭 / `shutdown` | `data: [DONE]`（之后连接可能还开着） |
+| 拆包风险 | 半行 | 半行 / 半个 `\r\n` / 半个 UTF-8 码点 |
+
+设计记录（为什么这么拆、替代方案、踩过的坑）见 `docs/stage-s3b.md`。

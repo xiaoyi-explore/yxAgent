@@ -1,0 +1,19 @@
+: 这一帧是注释（OpenAI 的 keep-alive ping），解析器必须整行忽略
+
+event: message
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake",
+data: "choices":[{"index":0,"delta":{"role":"assistant","content":"fake({{MSGS}} msgs)"}}]}
+
+: keep-alive
+
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{"content":" echo={{ECHO}}"}}]}
+
+: keep-alive
+: 连着两条注释也只是注释
+
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[],"usage":{"prompt_tokens":{{MSGS}},"completion_tokens":{{CLEN}},"total_tokens":{{TLEN}}}}
+
+data: [DONE]
+

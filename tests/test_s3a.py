@@ -74,7 +74,12 @@ def handshake(p):
 
 def chat(p, rid, text):
     send(p, {"type": "request", "id": rid, "method": "chat", "params": {"text": text}})
-    return recv(p)
+    # S3b 起 chat 会先吐 assistant.delta 事件（protocol.md §9 S3b 明写了这件事）。
+    # 本阶段只关心"最后结算的那一帧"，所以跳过事件帧——下面的断言一个字都没改。
+    while True:
+        f = recv(p)
+        if f.get("type") == "response":
+            return f
 
 
 def kill(p):

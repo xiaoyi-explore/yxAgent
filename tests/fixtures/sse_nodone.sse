@@ -1,0 +1,5 @@
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{"content":"fake({{MSGS}} msgs)"}}]}
+
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{"content":" echo={{ECHO}}"},"finish_reason":"stop"}]}
+
+data: {"id":"sse-1","object":"chat.completion.chunk","model":"fake","choices":[{"index":0,"delta":{"content":"（对端没发 [DONE] 就断了）"}}]}
