@@ -38,6 +38,12 @@ std::vector<std::string> split_utf8_codepoints(const std::string& s) {
   return out;
 }
 
+// 报错里只想看开头一点：不要把整段模型输出糊进一条错误消息
+std::string truncate(const std::string& s, size_t n) {
+  if (s.size() <= n) return s;
+  return s.substr(0, n) + "...";
+}
+
 std::string demo_reply(const std::string& text, int64_t turn) {
   return "收到第 " + std::to_string(turn) + " 句：「" + text +
          "」—— 我是 S2 的假模型，只会把你说的话原样还给你；真模型在 S3 接入。";
@@ -59,6 +65,17 @@ CoreEngine::CoreEngine(Options opts) : opts_(std::move(opts)) {
         opts_.api_key,
         opts_.model.empty() ? "deepseek-chat" : opts_.model,
         opts_.provider_timeout_ms});
+  }
+
+  // S4：把 --tools 点名的工具装进注册表。名字不认识不致命（引擎少一件手脚），但必须吵：
+  // 静默丢一个工具，模型会一直抱怨"我没有这个能力"，而人以为是模型笨。
+  for (const std::string& name : opts_.tools) {
+    auto tool = make_builtin_tool(name, opts_.workdir);
+    if (!tool) {
+      std::cerr << "[core] warning: unknown tool ignored: " << name << " (known: read_file, write_file, run_shell)" << "\n";
+      continue;
+    }
+    tools_.add(std::move(tool));
   }
 }
 
@@ -154,20 +171,113 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
                                ? params["text"].get<std::string>() : "";
     const int64_t turn = ++turn_;
     const std::string turn_id = "t" + std::to_string(turn);
+
+    // 失败要整轮回滚：这一轮可能往历史里塞了 user / assistant(tool_calls) / 若干 tool 消息。
+    // 只 pop 一条是不够的（S3a 的契约：失败的一轮不得污染下一次请求）。
+    const size_t history_mark = history_.size();
     history_.push_back(Message{"user", text});
-    // S3b：流式时每个增量立刻变成一个 assistant.delta（帧形状 S2 就定死了，前端一行都不用改）。
+
+    // S3b：流式时每个增量立刻变成一个 assistant.delta。
     // 顺序：delta 必须在本轮 response **之前**发完，response 永远是最后一帧（protocol.md §9 不变量 1）。
     const bool use_stream = opts_.stream && provider_->supports_stream();
-    const auto on_delta = [&](const std::string& piece) {
-      emit(proto::frame_event(++seq_, "assistant.delta", json{{"turn_id", turn_id}, {"text", piece}}));
-    };
+    const std::vector<ToolSpec> specs = tools_.specs();
+    size_t tool_calls_total = 0;
+
     try {
-      const ChatResult r = use_stream ? provider_->chat_stream(history_, on_delta) : provider_->chat(history_);
-      history_.push_back(Message{"assistant", r.text});
-      emit(proto::frame_response_ok(id, json{{"turn_id", turn_id}, {"text", r.text},
-                                             {"stop_reason", r.finish_reason}, {"usage", r.usage}}));
+      for (int step = 1;; ++step) {
+        if (step > opts_.max_steps) {
+          // 循环硬上限：模型一直要调工具就是不肯收尾，这时候必须有人喊停。
+          history_.resize(history_mark);
+          send_err(id, "MAX_STEPS", "agent loop stopped after " + std::to_string(opts_.max_steps) +
+                                        " model calls without a final answer (raise --max-steps if this is expected)");
+          return;
+        }
+
+        ChatRequest req;
+        req.messages = history_;
+        req.tools = specs;
+
+        // delta 带 step：一个 turn 可能有多个 step，前端要知道"这句话是哪一轮说的"
+        const auto on_delta = [&](const std::string& piece) {
+          emit(proto::frame_event(++seq_, "assistant.delta",
+                                  json{{"turn_id", turn_id}, {"step", step}, {"text", piece}}));
+        };
+        const ChatResult r = use_stream ? provider_->chat_stream(req, on_delta) : provider_->chat(req);
+
+        if (r.tool_calls.empty()) {  // 模型给出最终答复：本 turn 结束
+          history_.push_back(Message{"assistant", r.text});
+          emit(proto::frame_response_ok(id, json{{"turn_id", turn_id},
+                                                 {"text", r.text},
+                                                 {"stop_reason", r.finish_reason},
+                                                 {"usage", r.usage},
+                                                 {"steps", step},
+                                                 {"tool_calls", static_cast<int64_t>(tool_calls_total)}}));
+          return;
+        }
+
+        // 模型要调工具：先把这条 assistant 消息（带 tool_calls）记进历史，
+        // 否则下一轮模型不知道自己刚才要求过什么。
+        Message assistant{"assistant", r.text};
+        assistant.tool_calls = r.tool_calls;
+        history_.push_back(assistant);
+
+        for (const ToolCall& call : r.tool_calls) {
+          ++tool_calls_total;
+
+          // 模型的 arguments 是 JSON 文本：坏 JSON 不是崩溃的理由，而是要告诉模型"你写错了"
+          json args = json::object();
+          std::string arg_error;
+          if (call.arguments.empty()) {
+            args = json::object();
+          } else {
+            args = json::parse(call.arguments, nullptr, false);
+            if (args.is_discarded() || !args.is_object()) {
+              arg_error = "arguments are not a valid JSON object";
+              args = json::object();
+            }
+          }
+
+          json call_payload = {{"turn_id", turn_id},
+                               {"step", step},
+                               {"call_id", call.id},
+                               {"name", call.name},
+                               {"arguments", args}};
+          if (!arg_error.empty()) call_payload["arguments_raw"] = call.arguments;
+          emit(proto::frame_event(++seq_, "tool.call", call_payload));
+
+          const auto started = std::chrono::steady_clock::now();
+          const ToolResult res = arg_error.empty()
+                                     ? tools_.execute(call.name, args)
+                                     : ToolResult::failure(arg_error + ": " + truncate(call.arguments, 200));
+          const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - started).count();
+
+          emit(proto::frame_event(++seq_, "tool.result",
+                                  json{{"turn_id", turn_id},
+                                       {"step", step},
+                                       {"call_id", call.id},
+                                       {"name", call.name},
+                                       {"ok", res.ok},
+                                       {"output", res.output},
+                                       {"error", res.error},
+                                       {"duration_ms", static_cast<int64_t>(elapsed)}}));
+
+          // 工具结果回灌历史。**失败也要回灌**：ERROR 是模型自我纠正的唯一线索。
+          std::string content;
+          if (res.ok) {
+            content = res.output;
+          } else {
+            content = "ERROR: " + res.error;
+            if (!res.output.empty()) content += "\n" + res.output;
+          }
+          Message tool_msg{"tool", content};
+          tool_msg.tool_call_id = call.id;
+          tool_msg.name = call.name;
+          history_.push_back(tool_msg);
+        }
+      }
     } catch (const std::exception& e) {
-      history_.pop_back();  // 失败的一轮不进历史：否则下一次请求会带着半截对话
+      history_.resize(history_mark);  // 失败的一轮不进历史：否则下一次请求会带着半截对话
       send_err(id, "PROVIDER_ERROR", e.what());
     }
     return;

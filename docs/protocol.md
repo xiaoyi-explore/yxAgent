@@ -317,3 +317,35 @@ cli ◄─response {turn_id, text, stop_reason, usage} ────── core  
 | 拆包风险 | 半行 | 半行 / 半个 `\r\n` / 半个 UTF-8 码点 |
 
 设计记录（为什么这么拆、替代方案、踩过的坑）见 `docs/stage-s3b.md`。
+### S4 追加：`tool.call` / `tool.result` 与 agent 循环
+
+`chat` 不再只是"问一句答一句"：core 装上 `--tools` 之后，一个 turn 里会**多次调用模型**（ReAct 循环）。
+协议只多了两个事件和一个字段——**响应的形状不变**，仍然在本轮结束时结算。
+
+```
+cli ──request chat {text} ────────────────────────────────────────────► core
+cli ◄─event assistant.delta {turn_id, step:1, text} ───────────────── core   ← 第 1 步的增量
+cli ◄─event tool.call       {turn_id, step:1, call_id, name, arguments} ─ core
+cli ◄─event tool.result     {turn_id, step:1, call_id, name, ok, output, error, duration_ms} ─ core
+cli ◄─event assistant.delta {turn_id, step:2, text} ───────────────── core   ← 第 2 步的增量
+cli ◄─response {turn_id, text, stop_reason, usage, steps, tool_calls} ─ core
+```
+
+| 项 | 内容 |
+|---|---|
+| 请求 | 与 S3a 相同：`{"type":"request","id":"r3","method":"chat","params":{"text":"统计 a.txt 的行数"}}` |
+| `tool.call` | `{"type":"event","seq":3,"name":"tool.call","payload":{"turn_id":"t1","step":1,"call_id":"call_1","name":"read_file","arguments":{"path":"a.txt"}}}` |
+| `tool.result` | `{"type":"event","seq":4,"name":"tool.result","payload":{"turn_id":"t1","step":1,"call_id":"call_1","name":"read_file","ok":true,"output":"…文件内容…","error":"","duration_ms":0}}` |
+| 增量新字段 | `assistant.delta` 多了 `step`（从 1 开始）。**一个 turn 可能有多个 step**，前端靠它知道"这句话是哪一轮说的" |
+| 响应新字段 | `steps`（本 turn 调了几次模型）、`tool_calls`（一共调了几次工具）；其余字段与 S3b 相同 |
+| **不变量 1** | response 仍是本轮**最后一帧**（S2 定的，S4 不改） |
+| **不变量 2（修订）** | `result.text` 恒等于**最后一个 step** 的 `assistant.delta.text` 顺序拼接。中间 step 的文字是模型的"自言自语"（它可能先说"我看看"再调工具），同样会以 delta 发出——所以不能再写成"所有 delta 的拼接" |
+| **不变量 3** | 每个 delta 仍是完整的 UTF-8 字符串 |
+| **不变量 4** | `tool.call` 与 `tool.result` 的 `call_id` 一一配对，且同一个 id 的 call 一定在 result 之前 |
+| **不变量 5** | 同一个 turn 内 `seq` 严格递增且无空洞（工具事件也占 seq） |
+| 循环上限 | `--max-steps N`（默认 8）。超了 → 错误响应 `MAX_STEPS`，本 turn 的整段历史回滚 |
+| 工具失败 | **不是 turn 失败**：`ok:false` + `error` 会以 `role=tool` 的消息回灌给模型（`ERROR: …`），让它自己纠正 |
+| 坏参数 | 模型的 `arguments` 不是合法 JSON 对象时：`tool.call` 里带 `arguments_raw`（原文），工具**不执行**，`tool.result.ok=false` |
+| 权限 | S4 没有审批：工具直接执行。`--tools` **默认关闭**就是这个阶段的阀门（审批在 S8 才做） |
+
+设计记录（为什么循环在 core、为什么默认关工具、踩过的坑）见 `docs/stage-s4.md`。

@@ -11,8 +11,8 @@
 | HTTP 客户端接入（先非流式） | 前端不该知道 HTTP 的存在 | S3a | ✅ |
 | SSE 流式解析（`chat` 的真增量） | 分片边界、码点切断、重试都发生在 core | S3b | ✅ |
 | 消息历史（真相状态） | 换前端不丢对话 | S3a | ✅ |
-| 工具注册表与执行 | 权限判定必须和执行同进程 | S4 | 🔜 |
-| Agent 循环（turn 状态机） | 循环是协议语义，不是 UI 语义 | S4 | 🔜 |
+| 工具注册表与执行（read_file / write_file / run_shell） | 权限判定必须和执行同进程 | S4 | ✅ |
+| Agent 循环（turn 状态机，ReAct + MAX_STEPS） | 循环是协议语义，不是 UI 语义 | S4 | ✅ |
 | 取消与节流 | 取消要穿透到 HTTP 层 | S5 | 🔜 |
 | token 预算与压缩 | 同上 | S6 | 🔜 |
 | 会话持久化 | 落盘格式是协议的一部分 | S7 | 🔜 |
@@ -42,6 +42,9 @@
    `src/core/sse.*` 是纯字节解析，不认识 HTTP（连带不知道 OpenAI）；
    它甚至**不链接** httplib/OpenSSL——`sse_parser_test` 这个构建目标就是证据，
    `tests/test_s3b.py::test_layering` 再扫一遍源码。
+6. **工具只在 core 里执行。** 前端只看得见 `tool.call` / `tool.result` 两个事件，
+   永远不碰文件系统、不执行命令；`src/core/tools.cpp` 自己也不认识 HTTP。
+   靠测试守：`tests/test_s4.py::test_layering`。
 
 ## S1 代码地图
 
@@ -74,3 +77,14 @@
 | `tests/fake_llm_sse.py` | ~180 | 假 SSE server：自然切块 / 切在 JSON 中间 / 切在码点中间 / 注释行 / 慢流 / 断连 / 401·429·500 / 掐断连接 / 无 usage / 无 `[DONE]` |
 | `tests/fixtures/sse_*.sse` | 4 个文件 | 可读的字节级 fixture（`{{MSGS}}`/`{{ECHO}}` 占位符由假 server 渲染） |
 | `tests/test_s3b.py` | ~330 | 74 项检查：六条 fixture + 断连 + 重试 + 两条回退路径 + cli e2e + 铁律 |
+## S4 代码地图
+
+| 文件 | 行数级 | 内容 |
+|---|---|---|
+| `src/core/tools.hpp/.cpp` | ~90 / ~340 | `Tool` 接口 / `ToolRegistry`（未知工具返回失败而不是抛异常）/ 三个内置工具：`read_file`、`write_file`、`run_shell`（自带超时看门狗，stdout+stderr 合并） |
+| `src/core/provider.hpp` | +25 | `ToolCall` / `ToolSpec` / `ChatRequest`；`chat(req)` / `chat_stream(req, sink)`；`Message` 长出 `tool_calls` / `tool_call_id` / `name` |
+| `src/core/openai_compat.cpp` | +60 | `to_wire()`（唯一出现 OpenAI 字段名的地方）、tools 声明；**流式 tool_calls 按 index 累积** |
+| `src/core/core_engine.cpp` | +75 | ReAct 循环、`MAX_STEPS`、整轮回滚、`tool.call` / `tool.result` 事件、delta 带 `step` |
+| `src/core/main.cpp` + `src/cli/main.cpp` | +10 / +45 | `--tools/--workdir/--max-steps` 透传；cli 渲染工具行、按 `step` 决定结算时要不要重播全文 |
+| `tests/fake_llm_tools.py` | ~250 | 假 server：**看请求说话**（最后一条是 tool 就收尾，否则要工具）。分片参数、多工具、坏 JSON、超时、永不停机等十种剧本 |
+| `tests/test_s4.py` | ~330 | 45 项检查：真执行三个工具 + 分片累积 + 失败回灌 + MAX_STEPS + 非流式 + tools 声明开/关 + cli e2e |

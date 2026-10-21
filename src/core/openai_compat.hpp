@@ -1,6 +1,7 @@
 #pragma once
 // OpenAI 兼容端点（DeepSeek / OpenAI / 本地 vLLM 都是这一族）。
-// S3a：非流式；S3b：`stream: true` + SSE 增量，非流式作为回退保留。
+// S3a：非流式；S3b：`stream: true` + SSE 增量，非流式作为回退保留；
+// S4：请求带 `tools`，回复带 `tool_calls`（流式下 arguments 是分片累积出来的）。
 #include "core/provider.hpp"
 
 #include <string>
@@ -28,8 +29,8 @@ class OpenAICompatProvider : public Provider {
  public:
   explicit OpenAICompatProvider(OpenAIConfig cfg);
 
-  ChatResult chat(const std::vector<Message>& messages) override;
-  ChatResult chat_stream(const std::vector<Message>& messages, const DeltaSink& on_delta) override;
+  ChatResult chat(const ChatRequest& req) override;
+  ChatResult chat_stream(const ChatRequest& req, const DeltaSink& on_delta) override;
   bool supports_stream() const override { return true; }
 
  private:

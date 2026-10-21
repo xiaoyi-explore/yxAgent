@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <string>
 #include <thread>
 #include <utility>
@@ -52,12 +53,55 @@ struct RetryableError : ProviderError {
   explicit RetryableError(const std::string& what) : ProviderError(what) {}
 };
 
-json make_body(const OpenAIConfig& cfg, const std::vector<Message>& messages, bool stream) {
+// ---- wire format：core 的 Message -> OpenAI 的 JSON ----
+// 只在这里出现 OpenAI 的字段名，别的地方都只认 core::Message（换厂商时只改这里）。
+json to_wire(const Message& m) {
+  json j = {{"role", m.role}, {"content", m.content}};
+  if (!m.tool_calls.empty()) {
+    j["tool_calls"] = json::array();
+    for (const ToolCall& c : m.tool_calls) {
+      j["tool_calls"].push_back({{"id", c.id},
+                                 {"type", "function"},
+                                 {"function", {{"name", c.name}, {"arguments", c.arguments}}}});
+    }
+  }
+  if (!m.tool_call_id.empty()) j["tool_call_id"] = m.tool_call_id;
+  if (!m.name.empty() && m.role == "tool") j["name"] = m.name;
+  return j;
+}
+
+json make_body(const OpenAIConfig& cfg, const ChatRequest& req, bool stream) {
   json body = {{"model", cfg.model}, {"stream", stream}, {"messages", json::array()}};
-  for (const auto& m : messages) body["messages"].push_back({{"role", m.role}, {"content", m.content}});
+  for (const Message& m : req.messages) body["messages"].push_back(to_wire(m));
+
+  if (!req.tools.empty()) {
+    body["tools"] = json::array();
+    for (const ToolSpec& t : req.tools) {
+      body["tools"].push_back({{"type", "function"},
+                               {"function", {{"name", t.name},
+                                             {"description", t.description},
+                                             {"parameters", t.parameters}}}});
+    }
+  }
   // OpenAI 的流式默认**不带** usage，要显式开口（docs/protocol.md §9 S3b）
   if (stream) body["stream_options"] = {{"include_usage", true}};
   return body;
+}
+
+// 一段完整的 assistant 消息 -> ChatResult 的公共部分（非流式路径用）
+void parse_assistant_message(const json& m, ChatResult& out) {
+  if (m.contains("content") && m["content"].is_string()) out.text = m["content"].get<std::string>();
+  if (!m.contains("tool_calls") || !m["tool_calls"].is_array()) return;
+  for (const json& tc : m["tool_calls"]) {
+    if (!tc.is_object()) continue;
+    ToolCall call;
+    call.id = tc.value("id", "");
+    if (tc.contains("function") && tc["function"].is_object()) {
+      call.name = tc["function"].value("name", "");
+      call.arguments = tc["function"].value("arguments", "");
+    }
+    out.tool_calls.push_back(std::move(call));
+  }
 }
 
 // 整段 JSON 回复 -> ChatResult。S3a 的路径；S3b 的"非流式回退"也走这里。
@@ -69,8 +113,7 @@ ChatResult parse_completion_body(const std::string& body) {
 
   const json& c0 = j["choices"][0];
   ChatResult r;
-  if (c0.contains("message") && c0["message"].contains("content") && c0["message"]["content"].is_string())
-    r.text = c0["message"]["content"].get<std::string>();
+  if (c0.contains("message") && c0["message"].is_object()) parse_assistant_message(c0["message"], r);
   r.finish_reason = c0.value("finish_reason", "");
   if (j.contains("usage") && j["usage"].is_object()) r.usage = j["usage"];
   return r;
@@ -96,7 +139,7 @@ void OpenAICompatProvider::require_credentials() const {
     throw ProviderError("no api key (set DEEPSEEK_API_KEY in the environment, or pass --api-key)");
 }
 
-ChatResult OpenAICompatProvider::chat(const std::vector<Message>& messages) {
+ChatResult OpenAICompatProvider::chat(const ChatRequest& req) {
   require_credentials();
   const Endpoint ep = parse_endpoint(cfg_.base_url);
 
@@ -104,7 +147,7 @@ ChatResult OpenAICompatProvider::chat(const std::vector<Message>& messages) {
   setup_client(cli, cfg_);
 
   const httplib::Headers headers = {{"Authorization", "Bearer " + cfg_.api_key}};
-  const auto res = cli.Post(ep.path, headers, make_body(cfg_, messages, false).dump(), "application/json");
+  const auto res = cli.Post(ep.path, headers, make_body(cfg_, req, false).dump(), "application/json");
   if (!res) {
     throw ProviderError("HTTP transport error: " + httplib::to_string(res.error()) + " (" + ep.origin + ep.path + ")");
   }
@@ -115,10 +158,10 @@ ChatResult OpenAICompatProvider::chat(const std::vector<Message>& messages) {
   return parse_completion_body(res->body);
 }
 
-ChatResult OpenAICompatProvider::chat_stream(const std::vector<Message>& messages, const DeltaSink& on_delta) {
+ChatResult OpenAICompatProvider::chat_stream(const ChatRequest& req, const DeltaSink& on_delta) {
   require_credentials();
   const Endpoint ep = parse_endpoint(cfg_.base_url);
-  const std::string body = make_body(cfg_, messages, true).dump();
+  const std::string body = make_body(cfg_, req, true).dump();
   const int attempts = std::max(1, cfg_.max_attempts);
 
   bool emitted = false;  // 已经交给前端增量了吗？——决定重试安不安全
@@ -144,6 +187,10 @@ ChatResult OpenAICompatProvider::stream_once(const std::string& origin, const st
   std::string stream_error;  // 网关在流里插的 {"error":...}
   bool saw_json = false;     // 收到过合法的 SSE JSON 事件 = 对端确实在按 SSE 说话
 
+  // S4 的头号坑：tool_calls 的 arguments 是**分片**到达的，必须按 index 累积拼接。
+  // 用 map 而不是 vector：分片可能乱序（先 index=1 再 index=0），键序负责还原顺序。
+  std::map<int, ToolCall> partial_calls;
+
   SseParser parser([&](const SseEvent& ev) {
     if (ev.data.empty()) return;
     if (ev.data == "[DONE]") return;  // 流结束标记：后面不再有 JSON
@@ -167,6 +214,23 @@ ChatResult OpenAICompatProvider::stream_once(const std::string& origin, const st
             out.text += piece;  // 结算 = 增量的顺序拼接（protocol.md §9 不变量 2）
             emitted = true;
             if (on_delta) on_delta(piece);
+          }
+        }
+        if (d.contains("tool_calls") && d["tool_calls"].is_array()) {
+          for (const json& tc : d["tool_calls"]) {
+            if (!tc.is_object()) continue;
+            ToolCall& slot = partial_calls[tc.value("index", 0)];  // 按 index 累积，不是按数组下标
+            if (tc.contains("id") && tc["id"].is_string()) {
+              const std::string id = tc["id"].get<std::string>();
+              if (!id.empty()) slot.id = id;  // id 只来一次
+            }
+            if (tc.contains("function") && tc["function"].is_object()) {
+              const json& f = tc["function"];
+              if (f.contains("name") && f["name"].is_string())
+                slot.name += f["name"].get<std::string>();  // 名字也可能被切开
+              if (f.contains("arguments") && f["arguments"].is_string())
+                slot.arguments += f["arguments"].get<std::string>();  // 参数永远是分片
+            }
           }
         }
       }
@@ -214,6 +278,8 @@ ChatResult OpenAICompatProvider::stream_once(const std::string& origin, const st
     if (!r.text.empty()) emitted = true;
     return r;
   }
+
+  for (auto& kv : partial_calls) out.tool_calls.push_back(std::move(kv.second));  // 键序 = index 序
   return out;
 }
 

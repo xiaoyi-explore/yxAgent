@@ -25,7 +25,8 @@ find_package(Threads REQUIRED)
 add_library(agent_core_lib STATIC
   src/core/core_engine.cpp
   src/core/openai_compat.cpp
-  src/core/sse.cpp)          # S3b：SSE 增量解析（本身不认识 HTTP，见下）
+  src/core/sse.cpp           # S3b：SSE 增量解析（本身不认识 HTTP，见下）
+  src/core/tools.cpp)        # S4：工具层（read_file / write_file / run_shell）
 target_link_libraries(agent_core_lib PUBLIC agent_common httplib
                                       OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
@@ -51,3 +52,5 @@ add_test(NAME s3b_sse_parser
          COMMAND sse_parser_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
 add_test(NAME s3b_stream
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s3b.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)
+add_test(NAME s4_agent_tools
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s4.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)

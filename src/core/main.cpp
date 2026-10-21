@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 
 using proto::json;
 
@@ -20,7 +21,10 @@ void usage() {
                "  --model NAME        模型名（默认 deepseek-chat）\n"
                "  --api-key KEY       API key；更安全的方式是环境变量 DEEPSEEK_API_KEY（argv 在 ps 里可见）\n"
                "  --provider-timeout-ms N  读超时（默认 120000）\n"
-               "  --no-stream         不用 SSE，回到 S3a 的整段返回（默认是流式）\n";
+               "  --no-stream         不用 SSE，回到 S3a 的整段返回（默认是流式）\n"
+               "  --tools LIST        给模型装上手脚：all 或逗号分隔（read_file,write_file,run_shell）。默认不给\n"
+               "  --workdir DIR       工具的相对路径锚点，也是 run_shell 的工作目录（默认当前目录）\n"
+               "  --max-steps N       一个 turn 里最多几次模型调用（默认 8，防死循环）\n";
 }
 
 // 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
@@ -59,6 +63,9 @@ int main(int argc, char** argv) {
     else if (a == "--no-stream") opts.stream = false;   // 回到 S3a 的整段返回
     else if (a == "--stream") opts.stream = true;
     else if (opt_value(argc, argv, i, "--stream", v)) opts.stream = (v != "false" && v != "0");
+    else if (opt_value(argc, argv, i, "--tools", v)) opts.tools = core::parse_tool_list(v);
+    else if (opt_value(argc, argv, i, "--workdir", v)) opts.workdir = v;
+    else if (opt_value(argc, argv, i, "--max-steps", v)) opts.max_steps = std::max(1, std::atoi(v.c_str()));
     else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
   }
 

@@ -6,6 +6,7 @@
 //   "同进程直连"的全部秘密就是：把"写出到管道"换成"调用函数"。
 #include "common/protocol.hpp"
 #include "core/provider.hpp"
+#include "core/tools.hpp"
 
 #include <cstdint>
 #include <fstream>
@@ -37,6 +38,13 @@ struct Options {
   // true（默认）= chat 走 chat_stream()，每个增量立刻变成 assistant.delta；
   // false = 回到 S3a 的"一次性整段返回"（--no-stream；排查"是流式坏了还是模型坏了"用）。
   bool stream = true;
+
+  // —— S4：工具与 agent 循环 ——
+  // 启用的工具名（read_file / write_file / run_shell）；空 = 不给模型用工具 = S3b 的行为。
+  // 刻意默认关：能改文件、能跑命令的能力不该被"顺手"打开（审批层在 S8）。
+  std::vector<std::string> tools;
+  std::string workdir;      // 工具的相对路径锚点，也是 run_shell 的 cwd（空 = 进程当前目录）
+  int max_steps = 8;        // 一个 turn 里最多几次模型调用（ReAct 的硬上限，防死循环）
 };
 
 class CoreEngine {
@@ -65,6 +73,7 @@ class CoreEngine {
   Options opts_;
   std::ofstream log_;
   std::unique_ptr<Provider> provider_;  // 空 = 没有真模型（chat 会回 NO_PROVIDER）
+  ToolRegistry tools_;                  // 空 = 模型没有手脚（S4 之前的行为）
   std::vector<Message> history_;        // 消息历史（真相在 core）；S6 压缩、S7 落盘都从它来
   int64_t seq_ = 0;   // 事件序列号：从 1 开始、严格递增、无空洞（protocol.md §2.3）
   int64_t turn_ = 0;  // 第几轮对话（S2 只有 turn 这个概念，S3 会长大）

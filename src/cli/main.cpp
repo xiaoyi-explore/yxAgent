@@ -49,6 +49,16 @@ class PipeSession : public Session {
     if (!opts.model.empty()) args.push_back("--model=" + opts.model);
     args.push_back("--provider-timeout-ms=" + std::to_string(opts.provider_timeout_ms));
     args.push_back(opts.stream ? "--stream=true" : "--stream=false");  // S3b：流式与否由 core 决定
+    if (!opts.tools.empty()) {
+      std::string list;
+      for (const std::string& t : opts.tools) {
+        if (!list.empty()) list += ",";
+        list += t;
+      }
+      args.push_back("--tools=" + list);                                 // S4：工具清单透传给 core
+    }
+    if (!opts.workdir.empty()) args.push_back("--workdir=" + opts.workdir);
+    args.push_back("--max-steps=" + std::to_string(opts.max_steps));
 
     int to_core[2], from_core[2];
     if (::pipe(to_core) != 0 || ::pipe(from_core) != 0) throw std::runtime_error("pipe() failed");
@@ -198,6 +208,9 @@ void usage() {
                "  --base-url URL      真模型端点（默认 https://api.deepseek.com）\n"
                "  --model NAME        模型名（默认 deepseek-chat）\n"
                "  --no-stream         透传给 core：不用 SSE（回到 S3a 的整段返回）\n"
+               "  --tools LIST        透传给 core：all 或逗号分隔（read_file,write_file,run_shell），默认不给\n"
+               "  --workdir DIR       透传给 core：工具的相对路径锚点 / run_shell 的工作目录\n"
+               "  --max-steps N       透传给 core：一个 turn 里最多几次模型调用（默认 8）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
                "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
@@ -243,6 +256,10 @@ int main(int argc, char** argv) {
       cli.core_opts.provider_timeout_ms = std::max(1, std::atoi(v.c_str()));
     else if (a == "--no-stream") cli.core_opts.stream = false;
     else if (a == "--stream") cli.core_opts.stream = true;
+    else if (opt_value(argc, argv, i, "--tools", v)) cli.core_opts.tools = core::parse_tool_list(v);
+    else if (opt_value(argc, argv, i, "--workdir", v)) cli.core_opts.workdir = v;
+    else if (opt_value(argc, argv, i, "--max-steps", v))
+      cli.core_opts.max_steps = std::max(1, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
     else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
@@ -280,16 +297,47 @@ int main(int argc, char** argv) {
   std::string line;
   while (std::getline(std::cin, line)) {
     if (line.empty()) continue;
-    size_t deltas = 0;
-    bool prefix_printed = false;
+    size_t deltas = 0;            // 本轮所有增量（demo 分支的结算行要用）
+    size_t deltas_in_last_step = 0;  // **最后一个** model step 的增量数：决定结算时要不要重播全文
+    size_t cur_step = 0;
+    bool line_open = false;       // 输出是否停在一行中间
     const json resp = session->call(method, json{{"text", line}}, [&](const json& ev) {
-      if (ev.value("name", "") != "assistant.delta") return;
-      if (!prefix_printed) {
-        std::cout << "[assistant] " << std::flush;
-        prefix_printed = true;
+      const std::string name = ev.value("name", "");
+      const json payload = ev.contains("payload") ? ev["payload"] : json::object();
+
+      if (name == "assistant.delta") {
+        const size_t step = payload.value("step", 1);
+        if (step != cur_step) {  // S4：新的 model step——另起一行，别把两轮说的话黏在一起
+          if (line_open) std::cout << "\n";
+          cur_step = step;
+          deltas_in_last_step = 0;
+          std::cout << "[assistant] " << std::flush;
+          line_open = true;
+        }
+        std::cout << payload.value("text", "") << std::flush;  // 逐帧立刻输出 = 打字机
+        ++deltas;
+        ++deltas_in_last_step;
+        return;
       }
-      std::cout << ev["payload"].value("text", "") << std::flush;  // 逐帧立刻输出 = 打字机
-      ++deltas;
+
+      if (name == "tool.call") {  // S4：模型要用工具了（结构化参数，前端只负责显示）
+        if (line_open) {
+          std::cout << "\n";
+          line_open = false;
+        }
+        std::cout << "[tool] " << payload.value("name", "?") << " "
+                  << payload.value("arguments", json::object()).dump() << std::flush;
+        line_open = true;
+        return;
+      }
+
+      if (name == "tool.result") {  // S4：工具跑完了——ok/error 与耗时
+        std::cout << " -> " << (payload.value("ok", false) ? "ok" : "error");
+        if (!payload.value("ok", false)) std::cout << " (" << payload.value("error", "") << ")";
+        std::cout << " " << payload.value("duration_ms", 0) << "ms\n" << std::flush;
+        line_open = false;
+        return;
+      }
     });
 
     if (resp.is_null()) {
@@ -308,8 +356,18 @@ int main(int argc, char** argv) {
     } else {
       // S3b：流式时文字已经一个增量一个增量吐出来了，这里只换行；
       // 非流式（--no-stream / 对端无视 stream:true）才整段打印一次。
-      if (deltas == 0) std::cout << "[assistant] " << res.value("text", "") << "\n";
-      else std::cout << "\n";
+      // S4：判断依据是"**最后一个** step 有没有吐过字"——中间的 step 可能只说了一句就去调工具了。
+      const std::string text = res.value("text", "");
+      if (deltas_in_last_step == 0 && !text.empty()) {
+        if (line_open) {
+          std::cout << "\n";
+          line_open = false;
+        }
+        std::cout << "[assistant] " << text << "\n";
+      } else if (line_open) {
+        std::cout << "\n";
+        line_open = false;
+      }
       std::cout << "[turn " << res.value("turn_id", "?") << " done: stop_reason="
                 << res.value("stop_reason", "?");
       if (res.contains("usage") && res["usage"].is_object()) {
@@ -317,6 +375,10 @@ int main(int argc, char** argv) {
         std::cout << ", tokens=" << u.value("prompt_tokens", 0) << "/" << u.value("completion_tokens", 0)
                   << "/" << u.value("total_tokens", 0);
       }
+      // 只有真的多步/用过工具才多打两个数：单步对话的输出与 S3b 逐字节一致（老测试靠这个）
+      const long long steps = res.value("steps", 1LL);
+      const long long calls = res.value("tool_calls", 0LL);
+      if (steps > 1 || calls > 0) std::cout << ", steps=" << steps << ", tools=" << calls;
       std::cout << "]\n" << std::flush;
     }
   }
