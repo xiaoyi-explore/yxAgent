@@ -84,7 +84,7 @@
 | `src/core/tools.hpp/.cpp` | ~90 / ~340 | `Tool` 接口 / `ToolRegistry`（未知工具返回失败而不是抛异常）/ 三个内置工具：`read_file`、`write_file`、`run_shell`（自带超时看门狗，stdout+stderr 合并） |
 | `src/core/provider.hpp` | +25 | `ToolCall` / `ToolSpec` / `ChatRequest`；`chat(req)` / `chat_stream(req, sink)`；`Message` 长出 `tool_calls` / `tool_call_id` / `name` |
 | `src/core/openai_compat.cpp` | +60 | `to_wire()`（唯一出现 OpenAI 字段名的地方）、tools 声明；**流式 tool_calls 按 index 累积** |
-| `src/core/core_engine.cpp` | +75 | ReAct 循环、`MAX_STEPS`、整轮回滚、`tool.call` / `tool.result` 事件、delta 带 `step` |
+| `src/core/core_engine.cpp` | +95 | ReAct 循环、`MAX_STEPS`、整轮回滚、`tool.call` / `tool.result` 事件、delta 带 `step`、**系统提示词进 `history_[0]`** |
 | `src/core/main.cpp` + `src/cli/main.cpp` | +10 / +45 | `--tools/--workdir/--max-steps` 透传；cli 渲染工具行、按 `step` 决定结算时要不要重播全文 |
 | `tests/fake_llm_tools.py` | ~250 | 假 server：**看请求说话**（最后一条是 tool 就收尾，否则要工具）。分片参数、多工具、坏 JSON、超时、永不停机等十种剧本 |
 | `tests/test_s4.py` | ~330 | 45 项检查：真执行三个工具 + 分片累积 + 失败回灌 + MAX_STEPS + 非流式 + tools 声明开/关 + cli e2e |

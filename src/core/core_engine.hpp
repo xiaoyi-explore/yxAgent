@@ -45,6 +45,11 @@ struct Options {
   std::vector<std::string> tools;
   std::string workdir;      // 工具的相对路径锚点，也是 run_shell 的 cwd（空 = 进程当前目录）
   int max_steps = 8;        // 一个 turn 里最多几次模型调用（ReAct 的硬上限，防死循环）
+
+  // 系统提示词（--system）。空 = 有工具时用内置的 agent 提示词，没工具时不加 system 消息。
+  // 它会被塞进 history 的第 0 条：模型无状态，每次请求都要把整段 messages 重新发一遍，
+  // 放在历史里才能"自动每次都带上"，也才进得了 S7 的落盘。
+  std::string system_prompt;
 };
 
 class CoreEngine {

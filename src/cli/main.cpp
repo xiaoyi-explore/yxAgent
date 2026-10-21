@@ -58,6 +58,7 @@ class PipeSession : public Session {
       args.push_back("--tools=" + list);                                 // S4：工具清单透传给 core
     }
     if (!opts.workdir.empty()) args.push_back("--workdir=" + opts.workdir);
+    if (!opts.system_prompt.empty()) args.push_back("--system=" + opts.system_prompt);
     args.push_back("--max-steps=" + std::to_string(opts.max_steps));
 
     int to_core[2], from_core[2];
@@ -211,6 +212,7 @@ void usage() {
                "  --tools LIST        透传给 core：all 或逗号分隔（read_file,write_file,run_shell），默认不给\n"
                "  --workdir DIR       透传给 core：工具的相对路径锚点 / run_shell 的工作目录\n"
                "  --max-steps N       透传给 core：一个 turn 里最多几次模型调用（默认 8）\n"
+               "  --system TEXT       透传给 core：系统提示词（不给时有工具就用内置 agent 提示词）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
                "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
@@ -258,6 +260,7 @@ int main(int argc, char** argv) {
     else if (a == "--stream") cli.core_opts.stream = true;
     else if (opt_value(argc, argv, i, "--tools", v)) cli.core_opts.tools = core::parse_tool_list(v);
     else if (opt_value(argc, argv, i, "--workdir", v)) cli.core_opts.workdir = v;
+    else if (opt_value(argc, argv, i, "--system", v)) cli.core_opts.system_prompt = v;
     else if (opt_value(argc, argv, i, "--max-steps", v))
       cli.core_opts.max_steps = std::max(1, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;

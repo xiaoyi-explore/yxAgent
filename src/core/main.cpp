@@ -24,7 +24,8 @@ void usage() {
                "  --no-stream         不用 SSE，回到 S3a 的整段返回（默认是流式）\n"
                "  --tools LIST        给模型装上手脚：all 或逗号分隔（read_file,write_file,run_shell）。默认不给\n"
                "  --workdir DIR       工具的相对路径锚点，也是 run_shell 的工作目录（默认当前目录）\n"
-               "  --max-steps N       一个 turn 里最多几次模型调用（默认 8，防死循环）\n";
+               "  --max-steps N       一个 turn 里最多几次模型调用（默认 8，防死循环）\n"
+               "  --system TEXT       系统提示词；不给时：有 --tools 就用内置 agent 提示词，没工具就不加\n";
 }
 
 // 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
@@ -66,6 +67,7 @@ int main(int argc, char** argv) {
     else if (opt_value(argc, argv, i, "--tools", v)) opts.tools = core::parse_tool_list(v);
     else if (opt_value(argc, argv, i, "--workdir", v)) opts.workdir = v;
     else if (opt_value(argc, argv, i, "--max-steps", v)) opts.max_steps = std::max(1, std::atoi(v.c_str()));
+    else if (opt_value(argc, argv, i, "--system", v)) opts.system_prompt = v;
     else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
   }
 

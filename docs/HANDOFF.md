@@ -14,7 +14,7 @@
 | 分支 | `main` |
 | HEAD | tag `s4` 指向的提交（`git log --oneline -1` 就是它） |
 | tag | `s0` `s1` `s2` `s3a` `s3b` `s4` |
-| 测试 | `ctest` 100%：6 套 —— S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 解析器 24 / S4 45 |
+| 测试 | `ctest` 100%：6 套 —— S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 解析器 24 / S4 51 |
 | 真实模型 | DeepSeek `deepseek-chat`：流式（11 增量、首字 0.57s）与**工具循环**（read_file → wc -l → 答 "5"，3 步 2.7s）都已验证 |
 
 ## 2. 项目是什么（一句话）
@@ -79,6 +79,11 @@ printf '读一下 a.txt，统计行数\n' | ./build/agent-cli --tools all --work
   要变成一次 `ok=false` 的工具结果，**不许抛异常**。
 - **`assistant.delta` 必须带 `step`**：一个 turn 有多次模型调用，不带就没法判断"结算时要不要重播全文"。
 - **`run_shell` 必须自带超时看门狗**：模型写一句 `sleep 1000` 就能把整个 turn 冻住。
+- **模型是无状态的：每次请求都要把整段 `messages` 重新发。**
+
+  系统提示词在 `history_[0]`（`--system` 或内置 agent 提示词），不是每次现拼。
+  **光给 `tools` 数组不够**——那只说明"有哪些函数"，不说"什么时候该用"；
+  两个都要有。没工具时**不加** system（S1–S3b 的假 server 会数消息条数）。
 - `tests/fake_llm.py`（S3a）与 `tests/fake_llm_sse.py`（S3b）是那两阶段的验收基线，**不许改**；S4 用 `fake_llm_tools.py`。
 
 ## 7. 上下文预算策略（本文件存在的理由）

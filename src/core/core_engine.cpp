@@ -44,6 +44,20 @@ std::string truncate(const std::string& s, size_t n) {
   return s.substr(0, n) + "...";
 }
 
+// 启用工具但没给 --system 时的默认提示词。
+// 为什么需要它：模型是无状态的，"你能用工具"这件事光靠请求里的 tools 数组还不够——
+// tools 只说明"有哪些函数"，不说"什么时候该用、结果可不可信"。这两句话必须在提示词里讲清楚。
+std::string default_agent_prompt(const Options& opts) {
+  std::string p =
+      "你是一个能使用工具的 agent。\n"
+      "- 需要读文件、写文件或执行命令时，直接调用工具；不要凭空猜测文件内容或命令输出。\n"
+      "- 工具返回的结果是唯一可信的事实；失败时（ERROR: ...）先读错误，再决定换参数还是换做法。\n"
+      "- 拿到足够信息就给结论，不要反复调用同一个工具。\n";
+  if (!opts.workdir.empty()) p += "- 工作目录：" + opts.workdir + "（相对路径都相对于它）。\n";
+  p += "- 用用户的语言回答，简洁。\n";
+  return p;
+}
+
 std::string demo_reply(const std::string& text, int64_t turn) {
   return "收到第 " + std::to_string(turn) + " 句：「" + text +
          "」—— 我是 S2 的假模型，只会把你说的话原样还给你；真模型在 S3 接入。";
@@ -77,6 +91,13 @@ CoreEngine::CoreEngine(Options opts) : opts_(std::move(opts)) {
     }
     tools_.add(std::move(tool));
   }
+
+  // 系统提示词进历史第 0 条。注意：只在"有工具"或"显式给了 --system"时才加——
+  // S1–S3b 的假 server 会数消息条数（"fake(1 msgs)"），凭空多一条 system 会让它们全红。
+  // 回滚用 history_.resize(history_mark)，而 mark 至少是 1，所以这条永远不会被滚掉。
+  std::string system_prompt = opts_.system_prompt;
+  if (system_prompt.empty() && !tools_.empty()) system_prompt = default_agent_prompt(opts_);
+  if (!system_prompt.empty()) history_.push_back(Message{"system", system_prompt});
 }
 
 CoreEngine::~CoreEngine() = default;

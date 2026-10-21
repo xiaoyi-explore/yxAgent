@@ -95,6 +95,8 @@ def final_answer(mode, messages):
         return "命令超时了：" + content.replace(NL, " ")[:60]
     if mode == "write":
         return "写好了：" + content.replace(NL, " ").strip()[:60]
+    if mode == "plain":
+        return "纯文本回答，没有用任何工具"
     return "a.txt 共 %d 行" % count_lines(content)
 
 
@@ -220,6 +222,9 @@ class Handler(BaseHTTPRequestHandler):
             "tool_schemas": [t.get("function", {}).get("parameters") for t in (body.get("tools") or [])],
             "messages": len(messages),
             "last_role": last_role,
+            "first_role": messages[0].get("role", "") if messages else "",
+            "first_content": (messages[0].get("content") or "")[:200] if messages else "",
+            "system_count": sum(1 for m in messages if m.get("role") == "system"),
             "roles": [m.get("role") for m in messages],
             "has_tool_calls_in_history": any(m.get("tool_calls") for m in messages),
         })
@@ -227,6 +232,8 @@ class Handler(BaseHTTPRequestHandler):
         done = (last_role == "tool")
         if mode == "loop":
             done = False  # 永远不收尾
+        if mode == "plain":
+            done = True   # 从不调工具：用来验证"没有工具时请求里没有 system"
         if done:
             text = final_answer(mode, messages)
             return self._stream_answer(text) if stream else self._json_answer(text)

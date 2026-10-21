@@ -321,6 +321,49 @@ def test_cli(base, wd):
           out.count("[assistant]") == 1 and out.count("a.txt 共 3 行") == 1, out)
 
 
+def test_system_prompt(base, wd):
+    """模型是无状态的：系统提示词必须作为 history[0] 在**每一次**请求里重新发出去。"""
+    p = spawn_core("--base-url", base + "/tools", "--model", "fake", "--tools", "all", "--workdir", wd)
+    handshake(p)
+    turn(p, "r1", "统计 a.txt")
+    kill(p)
+    last = last_request(base)
+    check("有工具时自动带上系统提示词（请求的第 0 条是 system）",
+          last.get("first_role") == "system", str(last)[:300])
+    check("提示词讲了「该用工具」和「不要猜」（tools 数组只说有哪些函数，不说怎么用）",
+          "工具" in last.get("first_content", "")
+          and "不要凭空猜测" in last.get("first_content", ""), str(last.get("first_content"))[:200])
+    check("每一步请求都只带一条 system（不是越堆越多）", last.get("system_count") == 1,
+          str(last.get("system_count")))
+
+    p = spawn_core("--base-url", base + "/tools", "--model", "fake", "--tools", "all", "--workdir", wd,
+                   "--system", "你是测试助手 XYZ")
+    handshake(p)
+    turn(p, "r1", "统计 a.txt")
+    kill(p)
+    last = last_request(base)
+    check("--system 原样覆盖内置提示词", last.get("first_content") == "你是测试助手 XYZ",
+          repr(last.get("first_content")))
+
+    p = spawn_core("--base-url", base + "/plain", "--model", "fake", "--workdir", wd)
+    handshake(p)
+    turn(p, "r1", "闲聊")
+    kill(p)
+    last = last_request(base)
+    check("没有工具、也没有 --system 时不加 system（S1-S3b 的消息条数因此不变）",
+          last.get("first_role") == "user" and last.get("system_count") == 0, str(last)[:300])
+
+    p = spawn_core("--base-url", base + "/plain", "--model", "fake", "--workdir", wd,
+                   "--system", "你是一个只说反话的助手")
+    handshake(p)
+    turn(p, "r1", "闲聊")
+    kill(p)
+    last = last_request(base)
+    check("没有工具也能用 --system（纯聊天的人设）",
+          last.get("first_role") == "system" and last.get("first_content") == "你是一个只说反话的助手",
+          str(last)[:300])
+
+
 def test_layering():
     checks = []
     tools_src = (HERE.parent / "src" / "core" / "tools.cpp").read_text(encoding="utf-8")
@@ -351,6 +394,7 @@ def main():
         test_unknown_tool(base, wd)
         test_nonstream_tools(base, wd)
         test_tools_declared(base, wd)
+        test_system_prompt(base, wd)
         test_cli(base, wd)
         test_layering()
     finally:

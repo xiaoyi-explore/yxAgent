@@ -347,5 +347,6 @@ cli ◄─response {turn_id, text, stop_reason, usage, steps, tool_calls} ─ co
 | 工具失败 | **不是 turn 失败**：`ok:false` + `error` 会以 `role=tool` 的消息回灌给模型（`ERROR: …`），让它自己纠正 |
 | 坏参数 | 模型的 `arguments` 不是合法 JSON 对象时：`tool.call` 里带 `arguments_raw`（原文），工具**不执行**，`tool.result.ok=false` |
 | 权限 | S4 没有审批：工具直接执行。`--tools` **默认关闭**就是这个阶段的阀门（审批在 S8 才做） |
+| 系统提示词 | **不在这条协议里**：core 自己把它放在 `history[0]`（`--system` 或内置 agent 提示词），每次请求自动重发。前端看不见、也不需要知道——它只消费事件 |
 
 设计记录（为什么循环在 core、为什么默认关工具、踩过的坑）见 `docs/stage-s4.md`。
