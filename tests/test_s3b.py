@@ -50,6 +50,9 @@ def core_env(with_key=True):
 
 
 def spawn_core(*extra, env=None):
+    # S5 起 core 默认把增量按 30ms 合批（长回答不再一字一帧地打管道）。本套测试钉的是
+    # "一个 SSE 事件 -> 一帧"的解析契约，所以显式关掉合批；合批本身由 test_s5.py 验。
+    extra = (*extra, "--delta-batch-ms=0")
     return subprocess.Popen([CORE, *extra], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             text=True, env=env or core_env())
 

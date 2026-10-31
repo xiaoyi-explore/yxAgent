@@ -4,6 +4,12 @@
 // 本阶段最重要的设计（详见 docs/stage-s2.md）：
 //   引擎不关心自己跑在哪个进程里。run() 时帧写到 stdout；--embedded 时帧交给 cli 的回调。
 //   "同进程直连"的全部秘密就是：把"写出到管道"换成"调用函数"。
+//
+// S5 追加（docs/stage-s5.md）：
+//   * 取消要能在"一轮正在跑"的时候生效，所以读 stdin 变成**非阻塞**的（poll + read），
+//     在增量回调里顺手看一眼有没有 turn.cancel。**不引入线程**——单线程同样能做到，
+//     而且不用处理"谁能写 stdout"这种连锁问题。
+//   * 增量合批（默认 30ms）：长回答不再一字一帧地打管道。
 #include "common/protocol.hpp"
 #include "core/provider.hpp"
 #include "core/tools.hpp"
@@ -46,10 +52,15 @@ struct Options {
   std::string workdir;      // 工具的相对路径锚点，也是 run_shell 的 cwd（空 = 进程当前目录）
   int max_steps = 8;        // 一个 turn 里最多几次模型调用（ReAct 的硬上限，防死循环）
 
-  // 系统提示词（--system）。空 = 有工具时用内置的 agent 提示词，没工具时不加 system 消息。
+  // 系统提示词（--system）。空 = 有工具时用内置 agent 提示词，没工具时不加 system 消息。
   // 它会被塞进 history 的第 0 条：模型无状态，每次请求都要把整段 messages 重新发一遍，
   // 放在历史里才能"自动每次都带上"，也才进得了 S7 的落盘。
   std::string system_prompt;
+
+  // —— S5：增量合批 ——
+  // 同一 step 的 assistant.delta 先攒着，最多攒这么多毫秒再发一帧；0 = 不合批（一增量一帧）。
+  // 合批只影响**帧的密度**，不影响不变量 2（拼接仍等于 result.text）——测试两条都验。
+  int delta_batch_ms = 30;
 };
 
 class CoreEngine {
@@ -58,7 +69,9 @@ class CoreEngine {
   ~CoreEngine();
 
   // spawn 模式：stdio 上的协议循环。返回进程退出码。
-  int run(std::istream& in, std::ostream& out);
+  // S5 起不再接收 istream/ostream：取消需要在读 stdin 时做 poll，只有真实 fd 才能 poll。
+  // （签名"诚实"比"看起来可注入"重要——之前 run(in, out) 根本没用过 in/out。）
+  int run();
 
   // embedded 模式：处理一个请求帧（调用方已保证信封合法）。
   // 事件与响应都通过 sink 送出；sink 返回后本轮结束。
@@ -75,6 +88,12 @@ class CoreEngine {
  private:
   void log(char dir, const std::string& frame);
 
+  // —— S5：stdin 的非阻塞读（只在 run() 里启用；embedded 绝不去抢 cli 的 stdin）——
+  void pump_input();                        // 有多少读多少；解析出整行就立刻分发
+  void dispatch_line(const std::string& line);  // 一行 -> 立刻处理 / 排队 / 取消
+  bool read_next_line(std::string& line);   // 阻塞到凑够一整行；EOF 返回 false
+  void send(const std::string& frame);      // log + 当前 sink（给 dispatch_line 用）
+
   Options opts_;
   std::ofstream log_;
   std::unique_ptr<Provider> provider_;  // 空 = 没有真模型（chat 会回 NO_PROVIDER）
@@ -84,6 +103,14 @@ class CoreEngine {
   int64_t turn_ = 0;  // 第几轮对话（S2 只有 turn 这个概念，S3 会长大）
   bool shutdown_requested_ = false;
   int exit_code_ = 0;
+
+  // —— S5 状态（单线程，全部是普通变量，不需要原子量）——
+  bool stdio_mode_ = false;     // true = 正在跑 run()（可以读 stdin 找取消）；embedded 为 false
+  FrameSink sink_;              // 当前帧出口。handle_request 每个请求都会重设它
+  std::string in_buf_;          // 还没凑成整行的字节
+  std::vector<json> deferred_;  // 一轮进行中收到的其它请求：等这轮结束再按序处理
+  bool cancel_requested_ = false;
+  int64_t turn_active_ = 0;     // 正在跑的 turn 号；0 = 此刻没有 turn
 };
 
 }  // namespace core

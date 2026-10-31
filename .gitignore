@@ -7,3 +7,4 @@ build/
 # Python 测试产生的缓存
 __pycache__/
 *.pyc
+.cache/

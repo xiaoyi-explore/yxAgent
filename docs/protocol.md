@@ -94,6 +94,7 @@
 |---|---|---|
 | `user.message` / `turn.*` / 真 `assistant.delta` | S3b | 流式对话（S3a 的 `chat` 是非流式前身） |
 | `tool.call` / `tool.result` | S4 | 工具循环 |
+| `turn.cancel`（方法） | S5 | 打断正在跑的一轮；本轮以 `stop_reason=cancelled` 正常结算 |
 | `turn.cancel` | S5 | 取消 |
 | `context.compacted` | S6 | 压缩通知 |
 | `session.*` | S7 | 持久化与续传 |
@@ -350,3 +351,32 @@ cli ◄─response {turn_id, text, stop_reason, usage, steps, tool_calls} ─ co
 | 系统提示词 | **不在这条协议里**：core 自己把它放在 `history[0]`（`--system` 或内置 agent 提示词），每次请求自动重发。前端看不见、也不需要知道——它只消费事件 |
 
 设计记录（为什么循环在 core、为什么默认关工具、踩过的坑）见 `docs/stage-s4.md`。
+### S5 追加：`turn.cancel` 与增量合批
+
+取消**不是**新事件，而是新**方法**：前端在等响应期间发它，core 立刻停手，
+并且**照样回一个正常的 response**（这是 S2 定下的"每个请求恰好一个响应"）。
+
+```
+cli ──request chat {text} ─────────────────────────────────────────► core
+cli ◄─event assistant.delta {turn_id, step:1, text} ─────────────── core
+cli ──request turn.cancel {id:"c1"} ───────────────────────────────► core    ← 用户按了 Ctrl-C
+cli ◄─response {id:"c1", ok:true, result:{cancelled:true, turn:1}} ─ core    ← 取消的 ack
+cli ◄─response {id:"r1", result:{turn_id, text:"…半句…", stop_reason:"cancelled", …}} ─ core
+```
+
+| 项 | 内容 |
+|---|---|
+| 请求 | `{"type":"request","id":"c1","method":"turn.cancel","params":{}}` |
+| 响应 | `{"type":"response","id":"c1","ok":true,"result":{"cancelled":true,"turn":1}}`；没在跑时 `{"cancelled":false}` 且不带 `turn` |
+| 本轮的结算 | 仍是正常 response，`stop_reason` 变成 `"cancelled"`；`text` 是**已经产出**的那部分（不是空的，除非一个字都没来得及） |
+| **不变量 1** | response 仍是本轮最后一帧 |
+| **不变量 2（不变）** | `result.text` 仍等于本轮已发出 delta 的顺序拼接——**取消失败在这条上是最容易犯的错** |
+| 取消的穿透 | 一路走到 `content_receiver` 返回 false，HTTP 传输被当场掐断（不是"收完再丢"） |
+| 历史 | 取消**不回滚**：user 消息与已产出的半句都留在历史里（与"失败整轮回滚"相反，理由见 `stage-s5.md`） |
+| 非流式 | `--no-stream` 下取消只能在模型调用返回后生效（POST 掐不断），响应仍是 `cancelled` |
+| `--embedded` | **不支持取消**：同步回调、单线程，没有"等响应时还能读输入"的窗口 |
+| 增量合批 | `assistant.delta` 默认按 ~30ms 合批（`--delta-batch-ms N`，0 = 一增量一帧）。**只改帧密度，不改拼接** |
+| 假模型 | `demo.chat` **不合批**：S2 的验收基线是"一个 delta 恰好一个码点" |
+| 空闲取消 | 不报错（用户按 Ctrl-C 的时机永远可能落在两轮之间） |
+
+设计记录（为什么用 poll 而不是线程、为什么取消不回滚、踩过的三个坑）见 `docs/stage-s5.md`。

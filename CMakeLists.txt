@@ -54,3 +54,6 @@ add_test(NAME s3b_stream
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s3b.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)
 add_test(NAME s4_agent_tools
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s4.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)
+# S5：取消（turn.cancel）+ 增量合批。需要 fake_llm_sse.py 的 many / manyslow 两个模式。
+add_test(NAME s5_cancel_batching
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s5.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)

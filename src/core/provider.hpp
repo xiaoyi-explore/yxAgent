@@ -1,7 +1,8 @@
 #pragma once
 // Provider —— core 与"某个模型服务"之间的接缝。
 // S3a 只有非流式；S3b 长出 chat_stream()（把"整段"拆成"增量"）；
-// S4 再长出"工具"：请求里带 ToolSpec，回复里带 ToolCall。
+// S4 再长出"工具"：请求里带 ToolSpec，回复里带 ToolCall；
+// S5 让增量回调**有返回值**——返回 false 就是"别再读了"（取消要能穿透到 HTTP 层）。
 //
 // 这一层只管**格式**（OpenAI 的 wire format），不管**语义**：
 // 工具要不要执行、执行几次、循环几轮，全在 core 的 agent 循环里（docs/stage-s4.md）。
@@ -51,9 +52,12 @@ struct ChatRequest {
 
 struct ChatResult {
   std::string text;
-  std::string finish_reason;  // "stop" | "length" | "tool_calls" | "content_filter" ...
+  std::string finish_reason;  // "stop" | "length" | "tool_calls" | "content_filter" | "cancelled"
   json usage = json::object();
   std::vector<ToolCall> tool_calls;  // 非空 = 模型要求调工具（此时 text 通常是空的）
+  // S5：true = 这一轮是被 DeltaSink 喊停的（取消），不是模型自己说完的。
+  // 上层看到它必须**停止**本轮循环（不要再调工具、不要再发请求），但**不要**当失败处理。
+  bool cancelled = false;
 };
 
 // Provider 的错误：引擎捕获后统一变成 PROVIDER_ERROR 响应（见 docs/stage-s3a.md）
@@ -61,8 +65,11 @@ struct ProviderError : std::runtime_error {
   explicit ProviderError(const std::string& what) : std::runtime_error(what) {}
 };
 
-// 增量回调：每收到一小段新文本就调一次（可能是几个字，也可能是一个字）
-using DeltaSink = std::function<void(const std::string& delta)>;
+// 增量回调：每收到一小段新文本就调一次（可能是几个字，也可能是一个字）。
+// **返回值**：true = 继续读；false = 别读了（引擎喊停）。
+// 这个 bool 是 S5 取消语义的落点：provider 把它原样变成 content_receiver 的返回值，
+// HTTP 客户端于是中止这次传输——取消才能真正穿透到 HTTP 层，而不只是"发完再丢掉"。
+using DeltaSink = std::function<bool(const std::string& delta)>;
 
 class Provider {
  public:
@@ -76,7 +83,7 @@ class Provider {
   // 新增一种 provider 时不必强制实现流式——引擎那边只有一行 if 的差别。
   virtual ChatResult chat_stream(const ChatRequest& req, const DeltaSink& on_delta) {
     ChatResult r = chat(req);
-    if (!r.text.empty() && on_delta) on_delta(r.text);
+    if (!r.text.empty() && on_delta && !on_delta(r.text)) r.cancelled = true;
     return r;
   }
 

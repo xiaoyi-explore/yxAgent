@@ -38,6 +38,8 @@ MODE_TO_FIXTURE = {
     "splitjson": "sse_basic.sse",
     "splitutf8": "sse_basic.sse",
     "slow": "sse_basic.sse",
+    "many": "sse_many.sse",       # S5：12 个碎片增量（测合批）
+    "manyslow": "sse_many.sse",   # S5：同上但每个事件间隔 50ms（测取消）
     "abort": "sse_basic.sse",
     "droponce": "sse_basic.sse",
     "comment": "sse_comment.sse",
@@ -180,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
         data = render(mode, body)
         if mode in ("splitjson", "splitutf8"):
             return self._stream(split_at(data, mode))
-        if mode == "slow":
+        if mode in ("slow", "manyslow"):
             return self._stream(event_pieces(data), delay=0.05)
         if mode == "abort":
             return self._stream(event_pieces(data), abort_after=2)

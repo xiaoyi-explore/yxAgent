@@ -186,12 +186,14 @@ ChatResult OpenAICompatProvider::stream_once(const std::string& origin, const st
   std::string raw;           // 开头若干字节：错误正文、非流式回退都要看它
   std::string stream_error;  // 网关在流里插的 {"error":...}
   bool saw_json = false;     // 收到过合法的 SSE JSON 事件 = 对端确实在按 SSE 说话
+  bool aborted = false;      // S5：引擎喊停了（取消）。它必须变成 content_receiver 的 false
 
   // S4 的头号坑：tool_calls 的 arguments 是**分片**到达的，必须按 index 累积拼接。
   // 用 map 而不是 vector：分片可能乱序（先 index=1 再 index=0），键序负责还原顺序。
   std::map<int, ToolCall> partial_calls;
 
   SseParser parser([&](const SseEvent& ev) {
+    if (aborted) return;  // 喊停之后还在缓冲里的帧：一帧都不再处理
     if (ev.data.empty()) return;
     if (ev.data == "[DONE]") return;  // 流结束标记：后面不再有 JSON
 
@@ -213,7 +215,8 @@ ChatResult OpenAICompatProvider::stream_once(const std::string& origin, const st
           if (!piece.empty()) {
             out.text += piece;  // 结算 = 增量的顺序拼接（protocol.md §9 不变量 2）
             emitted = true;
-            if (on_delta) on_delta(piece);
+            // S5：false = 引擎要停（取消）。记下来，让 content_receiver 把这次传输掐掉。
+            if (on_delta && !on_delta(piece)) aborted = true;
           }
         }
         if (d.contains("tool_calls") && d["tool_calls"].is_array()) {
@@ -253,13 +256,22 @@ ChatResult OpenAICompatProvider::stream_once(const std::string& origin, const st
     parser.feed(data, len);
     if (!saw_json && raw.size() < kFallbackCap)
       raw.append(data, std::min(len, kFallbackCap - raw.size()));
-    return true;
+    // 返回值就是"还要不要继续收"：false 会让 httplib 中止这次传输（取消穿透到 HTTP 的那一步）。
+    return !aborted;
   };
 
   httplib::Response res;
   httplib::Error err = httplib::Error::Success;
   const bool sent = cli.send(req, res, err);
   parser.flush();  // 对端可能断在一个事件中间：把已经完整的部分结算掉
+
+  // 取消：这是**我们自己**掐的，既不是传输失败（别重试），也不是对端报错（别报 PROVIDER_ERROR）。
+  // 必须放在 !sent 之前判断——主动断流时 httplib 一定会返回 false + Error::Canceled。
+  if (aborted) {
+    out.cancelled = true;
+    if (out.finish_reason.empty()) out.finish_reason = "cancelled";
+    return out;
+  }
 
   if (!sent) {
     throw RetryableError("HTTP transport error: " + httplib::to_string(err) + " (" + origin + path + ")");

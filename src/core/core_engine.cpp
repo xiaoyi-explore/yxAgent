@@ -2,10 +2,13 @@
 
 #include "core/openai_compat.hpp"
 
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <iostream>
 #include <memory>
+#include <poll.h>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -122,7 +125,98 @@ void CoreEngine::log(char dir, const std::string& frame) {
   log_.flush();  // 实时落盘：崩溃时也能看到最后一帧
 }
 
+void CoreEngine::send(const std::string& frame) {
+  log('<', frame);
+  if (sink_) sink_(frame);
+}
+
+// ---------------------------------------------------------------- S5：读 stdin 的两张面孔
+
+// 阻塞到凑够一整行。返回 false = EOF（cli 关掉了管道）。
+bool CoreEngine::read_next_line(std::string& line) {
+  for (;;) {
+    const size_t pos = in_buf_.find('\n');
+    if (pos != std::string::npos) {
+      line = in_buf_.substr(0, pos);
+      in_buf_.erase(0, pos + 1);
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      return true;
+    }
+    struct pollfd p{STDIN_FILENO, POLLIN, 0};
+    const int rc = ::poll(&p, 1, -1);
+    if (rc < 0) {
+      if (errno == EINTR) continue;  // 被信号打断：重来
+      return false;
+    }
+    char chunk[4096];
+    const ssize_t got = ::read(STDIN_FILENO, chunk, sizeof chunk);
+    if (got <= 0) return false;  // EOF（或真的读错了：都当结束）
+    in_buf_.append(chunk, static_cast<size_t>(got));
+  }
+}
+
+// 非阻塞：有多少读多少。**这是 S5 取消能做到的全部秘密**——
+// 一轮正在跑（甚至正卡在 HTTP 读上）的时候，增量回调里顺手调它一次，
+// 就能把 cli 刚写进来的 turn.cancel 捞出来。
+void CoreEngine::pump_input() {
+  if (!stdio_mode_) return;  // embedded：stdin 是 cli 的，绝不去抢
+  for (;;) {
+    struct pollfd p{STDIN_FILENO, POLLIN, 0};
+    if (::poll(&p, 1, 0) <= 0) break;  // 0 = 现在没有，立刻回去干活
+    char chunk[4096];
+    const ssize_t got = ::read(STDIN_FILENO, chunk, sizeof chunk);
+    if (got <= 0) break;
+    in_buf_.append(chunk, static_cast<size_t>(got));
+  }
+  size_t pos;
+  while ((pos = in_buf_.find('\n')) != std::string::npos) {
+    std::string line = in_buf_.substr(0, pos);
+    in_buf_.erase(0, pos + 1);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty()) continue;
+    dispatch_line(line);
+  }
+}
+
+// 一行 -> 立刻处理 / 排队 / 取消
+void CoreEngine::dispatch_line(const std::string& line) {
+  const json v = proto::parse_frame(line);
+  if (v.is_null()) {
+    log('>', line);
+    send(proto::frame_response_err(json(), "PARSE_ERROR", "frame is not a valid JSON object"));
+    return;
+  }
+  const std::string type = (v.contains("type") && v["type"].is_string()) ? v["type"].get<std::string>() : "";
+  if (type != "request") {  // §6 未知即忽略：不响应
+    log('>', line);
+    return;
+  }
+  if (!proto::is_request(v)) {
+    log('>', line);
+    send(proto::frame_response_err(proto::extract_id(v), "INVALID_ENVELOPE",
+                                   "expected a request envelope (type=request with string id and method)"));
+    return;
+  }
+
+  const std::string method = v["method"].get<std::string>();
+  if (method == "turn.cancel") {
+    // 取消是**唯一**能在本轮进行中被处理的请求：它的全部意义就是"打断正在跑的东西"。
+    // 其他请求一律排队（协议保证每个请求都有响应，只是晚一点）。
+    log('>', v.dump());
+    const bool was_active = turn_active_ != 0;
+    cancel_requested_ = true;  // 空闲时置位也无害：下一轮开头会清掉
+    json result = {{"cancelled", was_active}};
+    if (was_active) result["turn"] = turn_active_;
+    send(proto::frame_response_ok(v["id"], result));
+    return;
+  }
+  deferred_.push_back(v);
+}
+
+// ---------------------------------------------------------------- 协议分发
+
 void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
+  sink_ = sink;  // pump_input 里的 ack 也要走同一条出口
   log('>', req.dump());
   const auto emit = [&](const std::string& frame) {
     log('<', frame);
@@ -172,6 +266,8 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
     const std::string reply = demo_reply(text, turn);
 
     // 一个请求 → 一串事件 → 最后才响应（protocol.md §9 S2）
+    // S5 刻意**不**给假模型合批：test_s2 用"一个 delta 恰好一个码点"钉着它，
+    // 那是 S2 的验收基线，不该为了新阶段的功能去动老契约。
     for (const std::string& cp : split_utf8_codepoints(reply)) {
       emit(proto::frame_event(++seq_, "assistant.delta", json{{"turn_id", turn_id}, {"text", cp}}));
       if (opts_.demo_delay_ms > 0)
@@ -195,14 +291,29 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
 
     // 失败要整轮回滚：这一轮可能往历史里塞了 user / assistant(tool_calls) / 若干 tool 消息。
     // 只 pop 一条是不够的（S3a 的契约：失败的一轮不得污染下一次请求）。
+    // 注意：**取消不走这条**——取消是用户喊停，已经发生的部分要留下（见下面的注释）。
     const size_t history_mark = history_.size();
     history_.push_back(Message{"user", text});
 
-    // S3b：流式时每个增量立刻变成一个 assistant.delta。
+    // S5：把"这一轮可以被取消"这件事告诉 turn.cancel 的处理者；~TurnFlag 负责复位。
+    struct TurnFlag {
+      int64_t& slot;
+      explicit TurnFlag(int64_t& s) : slot(s) {}
+      ~TurnFlag() { slot = 0; }
+    } turn_flag{turn_active_};
+    turn_active_ = turn;
+    cancel_requested_ = false;  // 清掉上一轮遗留
+
+    // S3b：流式时增量变成 assistant.delta。
     // 顺序：delta 必须在本轮 response **之前**发完，response 永远是最后一帧（protocol.md §9 不变量 1）。
     const bool use_stream = opts_.stream && provider_->supports_stream();
     const std::vector<ToolSpec> specs = tools_.specs();
     size_t tool_calls_total = 0;
+
+    // S5 合批：待发的一小批增量。跨 step 复用，但**每个 model call 结束前必须清空**
+    // （否则 result.text 与拼接对不上 = 不变量 2 破了）。
+    std::string pending;
+    auto last_flush = std::chrono::steady_clock::now();
 
     try {
       for (int step = 1;; ++step) {
@@ -214,16 +325,67 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
           return;
         }
 
+        // 合批的出口。任何**非 delta** 帧之前都必须先调它（顺序即正确性）。
+        const auto flush_delta = [&]() {
+          if (pending.empty()) return;
+          emit(proto::frame_event(++seq_, "assistant.delta",
+                                  json{{"turn_id", turn_id}, {"step", step}, {"text", pending}}));
+          pending.clear();
+          last_flush = std::chrono::steady_clock::now();
+        };
+
+        // 进模型调用之前先看一眼：上一个 step 跑工具的时候，用户可能已经按过 Ctrl-C
+        pump_input();
+        if (cancel_requested_) {
+          emit(proto::frame_response_ok(id, json{{"turn_id", turn_id},
+                                                 {"text", ""},
+                                                 {"stop_reason", "cancelled"},
+                                                 {"usage", json::object()},
+                                                 {"steps", step - 1},
+                                                 {"tool_calls", static_cast<int64_t>(tool_calls_total)}}));
+          return;
+        }
+
         ChatRequest req;
         req.messages = history_;
         req.tools = specs;
 
-        // delta 带 step：一个 turn 可能有多个 step，前端要知道"这句话是哪一轮说的"
-        const auto on_delta = [&](const std::string& piece) {
-          emit(proto::frame_event(++seq_, "assistant.delta",
-                                  json{{"turn_id", turn_id}, {"step", step}, {"text", piece}}));
+        // delta 带 step：一个 turn 可能有多个 step，前端要知道"这句话是哪一轮说的"。
+        // 返回值 false = 取消：provider 会把它变成 content_receiver 的返回值，HTTP 客户端于是中止传输。
+        const auto on_delta = [&](const std::string& piece) -> bool {
+          // 顺序是有讲究的：
+          // 1) 这一片**已经**被 provider 算进 result.text 了 —— 先收下（丢了就破不变量 2）；
+          // 2) 顺手看一眼 stdin：这就是"一轮正在流的时候也能按 Ctrl-C"的全部实现；
+          // 3) 该合批就合批；4) 最后才决定要不要继续读。
+          pending += piece;
+          pump_input();
+          const auto now = std::chrono::steady_clock::now();
+          const auto waited =
+              std::chrono::duration_cast<std::chrono::milliseconds>(now - last_flush).count();
+          if (opts_.delta_batch_ms <= 0 || pending.size() >= 512 ||
+              waited >= static_cast<long long>(opts_.delta_batch_ms))
+            flush_delta();
+          // 返回值 false = 取消：provider 会把它变成 content_receiver 的返回值，HTTP 客户端于是中止传输。
+          // 没 flush 的这批不会丢：调用返回后还有一次 flush_delta()。
+          return !cancel_requested_;
         };
+
         const ChatResult r = use_stream ? provider_->chat_stream(req, on_delta) : provider_->chat(req);
+        flush_delta();  // 先把最后一小批吐干净，再谈别的（不变量 2）
+
+        if (r.cancelled || cancel_requested_) {
+          // 取消 ≠ 失败。已经产出的文本**留在历史里**：用户屏幕上看到的和模型记得的必须一致，
+          // 否则下一轮就是"半句话 + 两个连续的 user"，比留着更糟。
+          // 代价写在 docs/stage-s5.md：取消时不做整轮回滚（那是失败语义）。
+          if (!r.text.empty()) history_.push_back(Message{"assistant", r.text});
+          emit(proto::frame_response_ok(id, json{{"turn_id", turn_id},
+                                                 {"text", r.text},
+                                                 {"stop_reason", "cancelled"},
+                                                 {"usage", r.usage},
+                                                 {"steps", step},
+                                                 {"tool_calls", static_cast<int64_t>(tool_calls_total)}}));
+          return;
+        }
 
         if (r.tool_calls.empty()) {  // 模型给出最终答复：本 turn 结束
           history_.push_back(Message{"assistant", r.text});
@@ -313,39 +475,28 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
   send_err(id, "UNKNOWN_METHOD", "no such method: " + method);
 }
 
-int CoreEngine::run(std::istream& in, std::ostream& out) {
-  const auto raw_write = [&](const std::string& frame) { out << frame << std::flush; };
-  const auto emit = [&](const std::string& frame) { log('<', frame); raw_write(frame); };
+int CoreEngine::run() {
+  stdio_mode_ = true;
+  sink_ = [](const std::string& frame) { std::cout << frame << std::flush; };
 
   // 第一帧永远是 event hello（protocol.md §4.1）
-  greet(raw_write);
+  greet(sink_);
 
-  std::string line;
-  while (std::getline(in, line)) {
-    if (line.empty()) continue;  // 忍耐空行，不打断会话
-
-    const json v = proto::parse_frame(line);
-    if (v.is_null()) {
-      log('>', line);
-      emit(proto::frame_response_err(json(), "PARSE_ERROR", "frame is not a valid JSON object"));
+  while (!shutdown_requested_) {
+    // 一轮进行中被排队的请求：现在按到达顺序补上（协议：每个请求都必须有响应）
+    if (!deferred_.empty()) {
+      json v = std::move(deferred_.front());
+      deferred_.erase(deferred_.begin());
+      handle_request(v, sink_);
       continue;
     }
-    const std::string type = (v.contains("type") && v["type"].is_string()) ? v["type"].get<std::string>() : "";
-    if (type != "request") {  // §6 未知即忽略：不响应
-      log('>', line);
-      continue;
-    }
-    if (!proto::is_request(v)) {
-      log('>', line);
-      emit(proto::frame_response_err(proto::extract_id(v), "INVALID_ENVELOPE",
-                                     "expected a request envelope (type=request with string id and method)"));
-      continue;
-    }
-    handle_request(v, raw_write);  // 它内部的 emit 负责记日志，别在这里重复记
-    if (shutdown_requested_) break;
+    std::string line;
+    if (!read_next_line(line)) break;  // EOF：cli 关了管道
+    if (line.empty()) continue;        // 忍耐空行，不打断会话
+    dispatch_line(line);
   }
 
-  out << std::flush;  // 退出前必须 flush（protocol.md §4.3 铁律）
+  std::cout << std::flush;  // 退出前必须 flush（protocol.md §4.3 铁律）
   return exit_code_;
 }
 

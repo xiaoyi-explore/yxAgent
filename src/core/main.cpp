@@ -25,7 +25,8 @@ void usage() {
                "  --tools LIST        给模型装上手脚：all 或逗号分隔（read_file,write_file,run_shell）。默认不给\n"
                "  --workdir DIR       工具的相对路径锚点，也是 run_shell 的工作目录（默认当前目录）\n"
                "  --max-steps N       一个 turn 里最多几次模型调用（默认 8，防死循环）\n"
-               "  --system TEXT       系统提示词；不给时：有 --tools 就用内置 agent 提示词，没工具就不加\n";
+               "  --system TEXT       系统提示词；不给时：有 --tools 就用内置 agent 提示词，没工具就不加\n"
+               "  --delta-batch-ms N  增量合批窗口（默认 30，0 = 一增量一帧；只影响帧密度，不影响拼接）\n";
 }
 
 // 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
@@ -68,6 +69,8 @@ int main(int argc, char** argv) {
     else if (opt_value(argc, argv, i, "--workdir", v)) opts.workdir = v;
     else if (opt_value(argc, argv, i, "--max-steps", v)) opts.max_steps = std::max(1, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--system", v)) opts.system_prompt = v;
+    else if (opt_value(argc, argv, i, "--delta-batch-ms", v))
+      opts.delta_batch_ms = std::max(0, std::atoi(v.c_str()));
     else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
   }
 
@@ -92,5 +95,6 @@ int main(int argc, char** argv) {
   }
 
   core::CoreEngine engine(std::move(opts));
-  return engine.run(std::cin, std::cout);
+  // S5：run() 不再收 istream/ostream —— 取消要在读 stdin 时做 poll，只有真实 fd 才能 poll。
+  return engine.run();
 }

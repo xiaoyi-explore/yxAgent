@@ -8,11 +8,13 @@
 #include "core/core_engine.hpp"
 
 #include <algorithm>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <poll.h>
 #include <stdexcept>
 #include <string>
 #include <sys/wait.h>
@@ -23,6 +25,11 @@
 using proto::json;
 
 namespace {
+
+// S5：Ctrl-C 只置一个 flag，真正的动作留给"正在等响应"的那段代码去做。
+// 在信号处理函数里写管道是 UB（printf/write 都不保证异步信号安全），所以只做这一件事。
+volatile sig_atomic_t g_interrupt = 0;
+void on_sigint(int) { g_interrupt = 1; }
 
 using EventSink = std::function<void(const json& ev)>;
 
@@ -60,6 +67,7 @@ class PipeSession : public Session {
     if (!opts.workdir.empty()) args.push_back("--workdir=" + opts.workdir);
     if (!opts.system_prompt.empty()) args.push_back("--system=" + opts.system_prompt);
     args.push_back("--max-steps=" + std::to_string(opts.max_steps));
+    args.push_back("--delta-batch-ms=" + std::to_string(opts.delta_batch_ms));  // S5：合批窗口
 
     int to_core[2], from_core[2];
     if (::pipe(to_core) != 0 || ::pipe(from_core) != 0) throw std::runtime_error("pipe() failed");
@@ -82,11 +90,12 @@ class PipeSession : public Session {
     ::close(to_core[0]);
     ::close(from_core[1]);
     in_ = ::fdopen(to_core[1], "w");
-    out_ = ::fdopen(from_core[0], "r");
-    if (in_ == nullptr || out_ == nullptr) throw std::runtime_error("fdopen() failed");
+    out_fd_ = from_core[0];  // 读端保持裸 fd（见 read_line 的注释：stdio 缓冲会和 poll 打架）
+    if (in_ == nullptr || out_fd_ < 0) throw std::runtime_error("fdopen() failed");
 
     // 握手第一步：第一帧永远是 event hello（protocol.md §4.1）
-    const json helo = proto::parse_frame(read_line(out_));
+    std::string helo_line;
+    const json helo = (read_line(helo_line, -1) == 1) ? proto::parse_frame(helo_line) : json();
     if (helo.is_null() || helo.value("name", "") != "hello")
       throw std::runtime_error("core did not send the hello event");
     hello = helo.contains("payload") ? helo["payload"] : json::object();
@@ -94,7 +103,7 @@ class PipeSession : public Session {
 
   ~PipeSession() override {
     if (in_ != nullptr) std::fclose(in_);
-    if (out_ != nullptr) std::fclose(out_);
+    if (out_fd_ >= 0) ::close(out_fd_);
     if (pid_ > 0) {
       int st = 0;
       ::waitpid(pid_, &st, 0);
@@ -104,9 +113,22 @@ class PipeSession : public Session {
   json call(const std::string& method, const json& params, const EventSink& on_event) override {
     const std::string rid = "r" + std::to_string(++next_id_);
     write_frame(in_, proto::frame_request(rid, method, params));
+    // S5：只有 chat 可能很久，也只有它值得取消。
+    const bool cancelable = (method == "chat");
+    bool cancel_sent = false;
     while (true) {
-      const std::string line = read_line(out_);
-      if (line.empty()) return json();  // EOF：core 死了
+      // 等响应的时候也要能"听见" Ctrl-C：先 poll 20ms，没数据就回去看一眼信号。
+      // 这就是"取消"在 cli 侧的全部实现——不起线程、不打断 getline。
+      if (cancelable && !cancel_sent && g_interrupt != 0) {
+        g_interrupt = 0;
+        cancel_sent = true;
+        std::cerr << "\n[cancel] 发出 turn.cancel（Ctrl-C 再按一次不会重复发）\n" << std::flush;
+        write_frame(in_, proto::frame_request("c" + std::to_string(++next_id_), "turn.cancel", json::object()));
+      }
+      std::string line;
+      const int st = read_line(line, 20);
+      if (st == 0) continue;      // 超时：回到循环顶部看信号
+      if (st < 0) return json();  // EOF：core 死了
       const json v = proto::parse_frame(line);
       if (v.is_null()) continue;
       const std::string type = v.value("type", "");
@@ -132,15 +154,31 @@ class PipeSession : public Session {
   }
 
  private:
-  static std::string read_line(FILE* f) {
-    char* buf = nullptr;
-    size_t cap = 0;
-    const ssize_t n = ::getline(&buf, &cap, f);
-    if (n < 0) { std::free(buf); return std::string(); }
-    std::string s(buf, static_cast<size_t>(n));
-    std::free(buf);
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-    return s;
+  // 读一整行：1 = 拿到一行，0 = 超时，-1 = EOF。
+  //
+  // 为什么不用 stdio 的 getline：它会把**后面的行**一起读进自己的缓冲区，
+  // 之后 poll(fd) 就会说"没数据"——而数据其实躺在 stdio 里，于是永远等下去。
+  // （S5 第一版就是这么挂死的：demo 模式下几十帧一起来，poll 再也不亮。）
+  int read_line(std::string& line, int timeout_ms) {
+    for (;;) {
+      const size_t pos = rbuf_.find('\n');
+      if (pos != std::string::npos) {
+        line = rbuf_.substr(0, pos);
+        rbuf_.erase(0, pos + 1);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        return 1;
+      }
+      if (!wait_readable(out_fd_, timeout_ms)) return 0;
+      char chunk[8192];
+      const ssize_t n = ::read(out_fd_, chunk, sizeof chunk);
+      if (n <= 0) return -1;
+      rbuf_.append(chunk, static_cast<size_t>(n));
+    }
+  }
+  static bool wait_readable(int fd, int timeout_ms) {
+    if (fd < 0) return false;
+    struct pollfd p{fd, POLLIN, 0};
+    return ::poll(&p, 1, timeout_ms) > 0;
   }
   static void write_frame(FILE* f, const std::string& frame) {
     std::fputs(frame.c_str(), f);
@@ -149,7 +187,8 @@ class PipeSession : public Session {
 
   pid_t pid_ = -1;
   FILE* in_ = nullptr;
-  FILE* out_ = nullptr;
+  int out_fd_ = -1;    // core 的 stdout（裸 fd：要 poll，就不能让 stdio 帮忙缓冲）
+  std::string rbuf_;   // 还没凑成整行的字节
   int64_t next_id_ = 0;
 };
 
@@ -213,6 +252,7 @@ void usage() {
                "  --workdir DIR       透传给 core：工具的相对路径锚点 / run_shell 的工作目录\n"
                "  --max-steps N       透传给 core：一个 turn 里最多几次模型调用（默认 8）\n"
                "  --system TEXT       透传给 core：系统提示词（不给时有工具就用内置 agent 提示词）\n"
+               "  --delta-batch-ms N  透传给 core：增量合批窗口（默认 30，0 = 一增量一帧）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
                "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
@@ -263,6 +303,8 @@ int main(int argc, char** argv) {
     else if (opt_value(argc, argv, i, "--system", v)) cli.core_opts.system_prompt = v;
     else if (opt_value(argc, argv, i, "--max-steps", v))
       cli.core_opts.max_steps = std::max(1, std::atoi(v.c_str()));
+    else if (opt_value(argc, argv, i, "--delta-batch-ms", v))
+      cli.core_opts.delta_batch_ms = std::max(0, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
     else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
@@ -295,10 +337,14 @@ int main(int argc, char** argv) {
   }
   std::cout << "[handshake] ok\n" << std::flush;
 
+  // S5：Ctrl-C 用来打断**正在跑的一轮**，不是退出程序——所以只装一个置 flag 的处理器。
+  std::signal(SIGINT, on_sigint);
+
   // REPL：--demo 走 demo.chat（S2 的假流式），否则走 chat（S3a 的真模型；S3b 起默认流式）
   const std::string method = cli.demo ? "demo.chat" : "chat";
   std::string line;
   while (std::getline(std::cin, line)) {
+    g_interrupt = 0;  // 在提示符上按的 Ctrl-C 不该延续到下一次提问
     if (line.empty()) continue;
     size_t deltas = 0;            // 本轮所有增量（demo 分支的结算行要用）
     size_t deltas_in_last_step = 0;  // **最后一个** model step 的增量数：决定结算时要不要重播全文
