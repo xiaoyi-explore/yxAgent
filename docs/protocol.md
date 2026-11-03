@@ -380,3 +380,28 @@ cli ◄─response {id:"r1", result:{turn_id, text:"…半句…", stop_reason:"
 | 空闲取消 | 不报错（用户按 Ctrl-C 的时机永远可能落在两轮之间） |
 
 设计记录（为什么用 poll 而不是线程、为什么取消不回滚、踩过的三个坑）见 `docs/stage-s5.md`。
+### S6 追加：`context.compacted` 事件
+
+压缩发生在 **core 内部**，前端**感觉不到**：它收到的 `assistant.delta` 与不压缩时一模一样。
+唯一可见的是"事儿发生了"这一条通知。
+
+```
+cli ──request chat {text} ─────────────────────────────────────────► core
+cli ◄─event context.compacted {before_tokens, after_tokens, …} ──── core   ← 只在真压过时出现
+cli ◄─event assistant.delta {turn_id, step, text} ───────────────── core
+cli ◄─response {turn_id, text, stop_reason, usage, …} ───────────── core
+```
+
+| 项 | 内容 |
+|---|---|
+| 事件 | `{"type":"event","seq":7,"name":"context.compacted","payload":{"turn_id":"t3","step":1,"budget":32000,"before_tokens":18400,"after_tokens":9100,"dropped_messages":12,"summarized_turns":3,"truncated_tool_results":2}}` |
+| 位置 | **在任何 `assistant.delta` 之前**——它发生在"模型还没被调用"的时候 |
+| **不变量 1** | response 仍是本轮最后一帧 |
+| **不变量 2** | delta 的拼接仍等于 `result.text`——压缩不改"这一轮说了什么" |
+| 前端该做什么 | 可以什么都不做；cli 只是往 **stderr** 打一行"已压缩 ~N -> ~M tokens"（不污染 stdout） |
+| 谁的真相 | 上下文**只在 core**：前端从来不知道历史有多长，也不该知道 |
+| 开关 | `--max-context-tokens N`（估算上限，0 = 关掉）、`--keep-recent-turns N`（默认 3 轮原样保留） |
+| 估算 vs 账本 | 预算是**估算**（字节/4，中文偏低）；`usage` 才是真账本。对端不给 usage 时**不许编 0** |
+| 历史形态 | 压缩后 `messages` 里会出现一条 `role:"user"`、以 `[压缩]` 开头的摘要消息（在第 0 条 system 之后） |
+
+设计记录（三级压缩、轮级豁免、为什么"不许变大"、踩过的四个坑）见 `docs/stage-s6.md`。

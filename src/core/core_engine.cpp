@@ -68,7 +68,10 @@ std::string demo_reply(const std::string& text, int64_t turn) {
 
 }  // namespace
 
-CoreEngine::CoreEngine(Options opts) : opts_(std::move(opts)) {
+CoreEngine::CoreEngine(Options opts)
+    : opts_(std::move(opts)),
+      // S6：阈值 0.5 是 Gemini CLI 的实测值；等到快满了再压，你会先被"一次多轮工具调用"顶爆。
+      ctx_(ContextConfig{opts_.max_context_tokens, 0.5, opts_.keep_recent_turns, 2048}) {
   if (!opts_.log_raw_path.empty()) {
     log_.open(opts_.log_raw_path, std::ios::out | std::ios::trunc);
     if (!log_) std::cerr << "[core] warning: cannot open log-raw file: " << opts_.log_raw_path << "\n";
@@ -292,7 +295,8 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
     // 失败要整轮回滚：这一轮可能往历史里塞了 user / assistant(tool_calls) / 若干 tool 消息。
     // 只 pop 一条是不够的（S3a 的契约：失败的一轮不得污染下一次请求）。
     // 注意：**取消不走这条**——取消是用户喊停，已经发生的部分要留下（见下面的注释）。
-    const size_t history_mark = history_.size();
+    // S6 提醒：压缩会让 history_ **变短**，所以这个水位线不是 const——压完要跟着往下挪。
+    size_t history_mark = history_.size();
     history_.push_back(Message{"user", text});
 
     // S5：把"这一轮可以被取消"这件事告诉 turn.cancel 的处理者；~TurnFlag 负责复位。
@@ -344,6 +348,23 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
                                                  {"steps", step - 1},
                                                  {"tool_calls", static_cast<int64_t>(tool_calls_total)}}));
           return;
+        }
+
+        // S6：进模型之前看一眼预算。压缩只动 history_（和本地那个回滚水位），协议只多一个事件。
+        // 放在这里（而不是构造时）的理由：每多一个 step 历史都会变长，压不压要看"现在"有多少。
+        const CompactReport rep = ctx_.compact(history_);
+        if (rep.did) {
+          // 历史可能被压得比回滚水位还短；不 clamp 的话 resize() 会把它**撑大**（补空消息）。
+          if (history_mark > history_.size()) history_mark = history_.size();
+          emit(proto::frame_event(++seq_, "context.compacted",
+                                  json{{"turn_id", turn_id},
+                                       {"step", step},
+                                       {"budget", static_cast<int64_t>(ctx_.config().max_tokens)},
+                                       {"before_tokens", static_cast<int64_t>(rep.before_tokens)},
+                                       {"after_tokens", static_cast<int64_t>(rep.after_tokens)},
+                                       {"dropped_messages", static_cast<int64_t>(rep.dropped_messages)},
+                                       {"summarized_turns", static_cast<int64_t>(rep.summarized_turns)},
+                                       {"truncated_tool_results", static_cast<int64_t>(rep.truncated_tools)}}));
         }
 
         ChatRequest req;

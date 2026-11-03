@@ -10,7 +10,11 @@
 //     在增量回调里顺手看一眼有没有 turn.cancel。**不引入线程**——单线程同样能做到，
 //     而且不用处理"谁能写 stdout"这种连锁问题。
 //   * 增量合批（默认 30ms）：长回答不再一字一帧地打管道。
+//
+// S6 追加（docs/stage-s6.md）：
+//   * 压缩只动 history_，协议只多一个 context.compacted 事件——前端仍然看不见"上下文"。
 #include "common/protocol.hpp"
+#include "core/context.hpp"
 #include "core/provider.hpp"
 #include "core/tools.hpp"
 
@@ -61,6 +65,12 @@ struct Options {
   // 同一 step 的 assistant.delta 先攒着，最多攒这么多毫秒再发一帧；0 = 不合批（一增量一帧）。
   // 合批只影响**帧的密度**，不影响不变量 2（拼接仍等于 result.text）——测试两条都验。
   int delta_batch_ms = 30;
+
+  // —— S6：上下文预算与压缩 ——
+  // 估算上限（token）。0 = 关掉整个 S6（要看原始行为时用）。
+  // 默认 32000：估算是"字节/4"，中文会被低估，所以预算要留一半余量。
+  size_t max_context_tokens = 32000;
+  int keep_recent_turns = 3;  // 最近几轮原样保留（轮 = user + 它引发的所有消息）
 };
 
 class CoreEngine {
@@ -98,6 +108,7 @@ class CoreEngine {
   std::ofstream log_;
   std::unique_ptr<Provider> provider_;  // 空 = 没有真模型（chat 会回 NO_PROVIDER）
   ToolRegistry tools_;                  // 空 = 模型没有手脚（S4 之前的行为）
+  ContextManager ctx_;                  // S6：预算与压缩（只认 vector<Message>，不认识协议）
   std::vector<Message> history_;        // 消息历史（真相在 core）；S6 压缩、S7 落盘都从它来
   int64_t seq_ = 0;   // 事件序列号：从 1 开始、严格递增、无空洞（protocol.md §2.3）
   int64_t turn_ = 0;  // 第几轮对话（S2 只有 turn 这个概念，S3 会长大）

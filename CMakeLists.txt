@@ -26,7 +26,8 @@ add_library(agent_core_lib STATIC
   src/core/core_engine.cpp
   src/core/openai_compat.cpp
   src/core/sse.cpp           # S3b：SSE 增量解析（本身不认识 HTTP，见下）
-  src/core/tools.cpp)        # S4：工具层（read_file / write_file / run_shell）
+  src/core/tools.cpp         # S4：工具层（read_file / write_file / run_shell）
+  src/core/context.cpp)      # S6：预算与压缩（只认 vector<Message>，不认识协议/HTTP）
 target_link_libraries(agent_core_lib PUBLIC agent_common httplib
                                       OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
@@ -40,6 +41,10 @@ target_link_libraries(agent-cli PRIVATE agent_core_lib)
 # 等于顺手用构建系统证明"sse 不依赖网络库"（铁律的机器化检查）。
 add_executable(sse_parser_test tests/sse_parser_test.cpp src/core/sse.cpp)
 target_link_libraries(sse_parser_test PRIVATE agent_common)
+
+# S6：压缩算法的纯单元测试（只编译 context.cpp，不链接网络/工具/引擎）。
+add_executable(context_test tests/context_test.cpp src/core/context.cpp)
+target_link_libraries(context_test PRIVATE agent_common)
 
 enable_testing()
 add_test(NAME s1_handshake
@@ -57,3 +62,7 @@ add_test(NAME s4_agent_tools
 # S5：取消（turn.cancel）+ 增量合批。需要 fake_llm_sse.py 的 many / manyslow 两个模式。
 add_test(NAME s5_cancel_batching
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s5.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)
+# S6：上下文预算与压缩（算法 + 端到端）。
+add_test(NAME s6_context_unit COMMAND context_test)
+add_test(NAME s6_context
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s6.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)

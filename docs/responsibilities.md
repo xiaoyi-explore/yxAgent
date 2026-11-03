@@ -13,8 +13,8 @@
 | 消息历史（真相状态） | 换前端不丢对话 | S3a | ✅ |
 | 工具注册表与执行（read_file / write_file / run_shell） | 权限判定必须和执行同进程 | S4 | ✅ |
 | Agent 循环（turn 状态机，ReAct + MAX_STEPS） | 循环是协议语义，不是 UI 语义 | S4 | ✅ |
-| 取消与节流 | 取消要穿透到 HTTP 层 | S5 | 🔜 |
-| token 预算与压缩 | 同上 | S6 | 🔜 |
+| 取消与节流 | 取消要穿透到 HTTP 层 | S5 | ✅ |
+| token 预算与压缩（`ContextManager`） | 只有 core 知道历史有多长；压缩是"认知"的活，不是 UI 的活 | S6 | ✅ |
 | 会话持久化 | 落盘格式是协议的一部分 | S7 | 🔜 |
 | 审批判定（allow/ask/deny） | 前端被绕过也不能失守 | S8 | 🔜 |
 
@@ -77,6 +77,15 @@
 | `tests/fake_llm_sse.py` | ~180 | 假 SSE server：自然切块 / 切在 JSON 中间 / 切在码点中间 / 注释行 / 慢流 / 断连 / 401·429·500 / 掐断连接 / 无 usage / 无 `[DONE]` |
 | `tests/fixtures/sse_*.sse` | 4 个文件 | 可读的字节级 fixture（`{{MSGS}}`/`{{ECHO}}` 占位符由假 server 渲染） |
 | `tests/test_s3b.py` | ~330 | 74 项检查：六条 fixture + 断连 + 重试 + 两条回退路径 + cli e2e + 铁律 |
+## S6 代码地图
+
+| 文件 | 行数级 | 内容 |
+|---|---|---|
+| `src/core/context.hpp` / `.cpp` | ~60 / ~230 | `ContextManager`：估算 → 三级压缩（裁剪 / 摘要 / 兜底）。只认 `vector<Message>`，不认识协议/HTTP |
+| `src/core/core_engine.cpp` | +30 | 每个 step 进模型前压一次；发 `context.compacted`；`history_mark` 跟着往下挪 |
+| `tests/context_test.cpp` | ~250 | 纯单元测试（只链 `context.cpp`）：配对、豁免、兜底、不许变大，共 28 项 |
+| `tests/test_s6.py` | ~200 | 端到端：事件、`/__last` 里的压缩后请求、关压缩、cli 不再编造 tokens |
+
 ## S4 代码地图
 
 | 文件 | 行数级 | 内容 |

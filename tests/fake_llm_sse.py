@@ -165,6 +165,14 @@ class Handler(BaseHTTPRequestHandler):
             "stream_options": body.get("stream_options"),
             "model": body.get("model"),
             "messages": len(body.get("messages") or []),
+            # S6：把"模型到底看到了什么"整段回读出来（每条内容截到 400 字节）。
+            # 压缩的验收就靠它：看 system 还在不在、摘要有没有带上早期事实、有没有孤儿 tool 消息。
+            "messages_full": [
+                {"role": m.get("role"),
+                 "content": (m.get("content") or "")[:400],
+                 "tool_calls": len(m.get("tool_calls") or [])}
+                for m in (body.get("messages") or [])
+            ],
             "authorization": self.headers.get("Authorization"),
         })
 

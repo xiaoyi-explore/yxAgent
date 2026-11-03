@@ -26,7 +26,9 @@ void usage() {
                "  --workdir DIR       工具的相对路径锚点，也是 run_shell 的工作目录（默认当前目录）\n"
                "  --max-steps N       一个 turn 里最多几次模型调用（默认 8，防死循环）\n"
                "  --system TEXT       系统提示词；不给时：有 --tools 就用内置 agent 提示词，没工具就不加\n"
-               "  --delta-batch-ms N  增量合批窗口（默认 30，0 = 一增量一帧；只影响帧密度，不影响拼接）\n";
+               "  --delta-batch-ms N  增量合批窗口（默认 30，0 = 一增量一帧；只影响帧密度，不影响拼接）\n"
+               "  --max-context-tokens N  上下文预算（估算 token，默认 32000；0 = 不压缩）\n"
+               "  --keep-recent-turns N   压缩时最近几轮原样保留（默认 3）\n";
 }
 
 // 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
@@ -71,6 +73,10 @@ int main(int argc, char** argv) {
     else if (opt_value(argc, argv, i, "--system", v)) opts.system_prompt = v;
     else if (opt_value(argc, argv, i, "--delta-batch-ms", v))
       opts.delta_batch_ms = std::max(0, std::atoi(v.c_str()));
+    else if (opt_value(argc, argv, i, "--max-context-tokens", v))
+      opts.max_context_tokens = static_cast<size_t>(std::max(0, std::atoi(v.c_str())));
+    else if (opt_value(argc, argv, i, "--keep-recent-turns", v))
+      opts.keep_recent_turns = std::max(1, std::atoi(v.c_str()));
     else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
   }
 

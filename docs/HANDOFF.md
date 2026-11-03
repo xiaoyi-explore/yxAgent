@@ -12,9 +12,9 @@
 |---|---|
 | 仓库 | `/root/project/yxAgent`（服务器 `111.228.29.170`） |
 | 分支 | `main` |
-| HEAD | tag `s5` 指向的提交（`git log --oneline -1` 就是它） |
-| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` |
-| 测试 | `ctest` 100%：**7 套** —— S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 解析器 24 / S4 51 / S5 24 |
+| HEAD | tag `s6` 指向的提交（`git log --oneline -1` 就是它） |
+| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` |
+| 测试 | `ctest` 100%：**9 套** —— S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / **S6 单元 28 / S6 端到端 31** |
 | 真实模型 | DeepSeek `deepseek-chat`：流式（11 增量、首字 0.57s）、**工具循环**（read_file → wc -l → 答 "5"，3 步 2.7s）已验证；S5 的取消用假 server（`/manyslow`）验，真模型手动 Ctrl-C 待冒烟 |
 
 ## 2. 项目是什么（一句话）
@@ -27,28 +27,32 @@
 |---|---|
 | `docs/protocol.md` | 线上到底发什么帧（S0 骨架 + S1/S2/S3a/S3b/S4 的追加） |
 | `docs/responsibilities.md` | 谁该拥有什么职责、铁律、逐阶段代码地图 |
-| `docs/stage-s2.md` / `stage-s3a.md` / `stage-s3b.md` / `stage-s4.md` / `stage-s5.md` | 这些阶段为什么这么设计、替代方案、踩了什么坑 |
-| `new-agent-stages-v2.md` | 13 个阶段的目标与 DoD（S6 的 token 预算在那一节） |
+| `docs/stage-s2.md` / `stage-s3a.md` / `stage-s3b.md` / `stage-s4.md` / `stage-s5.md` / `stage-s6.md` | 这些阶段为什么这么设计、替代方案、踩了什么坑 |
+| `new-agent-stages-v2.md` | 13 个阶段的目标与 DoD（S7 的落盘格式在那一节） |
 | **本文件** | **现在进行到哪、下一步、怎么验证** |
 
 > S0/S1 没有单独的 `stage-*.md`：S0 的设计就是 `protocol.md` 本身，S1 的记录在 `responsibilities.md` 的「S1 代码地图」。S2 起每阶段都有 `stage-sN.md`。
 
-## 4. 下一步（S6：token 预算与压缩）
+## 4. 下一步（S7：会话持久化、恢复与 headless）
 
-> 目标细节读 `new-agent-stages-v2.md` 的 S6 节；本文件只列"开始前必须知道的三件事"。
+> 目标细节读 `new-agent-stages-v2.md` 的 S7 节；本文件只列"开始前必须知道的四件事"。
 
-1. **预算是硬约束，不是估算**：`usage` 是唯一可信的账本（S3b 起流式也带了 `include_usage`）。
-   `result.usage` 缺失时**不许编造**（现在会对端不给就是 `{}`，cli 显示 `0/0/0` —— 这是 S6 该顺手修的）。
-2. **压缩只能动历史，不能动协议**：`history_` 在 core，压缩后客户端**看不见任何差别**（帧形状不变）。
-   如果将来需要前端知情（比如显示"历史被压缩了"），那是一个新 event，不是改 response。
-3. **失败/取消的既有契约不许破**：失败整轮回滚（`history_mark`）、取消保留已产出部分——压缩必须和这两条共存。
+1. **落盘格式是协议的一部分**：transcript 一旦写出去，改格式就等于改协议。
+   定格式之前先想清楚"三个月后的你还能不能读懂它"（NDJSON 比二进制友好）。
+2. **恢复要能重建 `history_`，包括 S6 的摘要**：摘要消息是 `role:"user"` 的普通消息，
+   天然能存能读；但要决定"恢复时要不要重新算预算"（答：要，因为 `usage` 重新开始）。
+3. **headless 前端（`agent-run`）是第二个前端——它必须只靠协议**。
+   如果它需要任何"只有 cli 才知道"的东西，说明前面某阶段的耦合没清干净。
+4. **恢复不能破坏既有不变量**：`response 是最后一帧`、`delta 拼接 == result.text`、
+   失败整轮回滚、取消保留已产出部分——这四条在任何新入口上都要成立。
 
-顺带欠账（S5 明确推掉的，别忘）：
+顺带欠账（明确推掉的，别忘）：
 
-- **只读工具并行、写工具串行**——需要真正的线程模型（或 `fork` + 非阻塞 `waitpid` 调度），
-  和"取消"是两件事，所以 S5 保持单线程。做它之前先想清楚"谁能写 stdout"。
+- **只读工具并行、写工具串行**——需要真正的线程模型（或 `fork` + 非阻塞 `waitpid` 调度）。
+  S5/S6 都保持单线程。做之前先想清楚"谁能写 stdout"。
 - `--embedded` 仍不支持取消（同步回调、单线程，没有等响应时读输入的窗口）。
 - 真模型的取消冒烟还没做（只跑了假 server）。
+- **模型摘要**（真让 LLM 写摘要）—— S6 只做了抽取式，登记在 `stage-s6.md` §5。
 
 ## 5. 恢复步骤（新会话 30 秒）
 
@@ -59,7 +63,7 @@ cmake --build build 2>&1 | tail -3
 cd build && ctest 2>&1 | tail -3
 ```
 
-全绿（7 套）= 基线完好，直接从 §4 开始。真实模型冒烟（**记得给 --tools**，默认是不给工具的）：
+全绿（9 套）= 基线完好，直接从 §4 开始。真实模型冒烟（**记得给 --tools**，默认是不给工具的）：
 
 ```bash
 export DEEPSEEK_API_KEY=$(head -1 /tmp/deepseek.key.bak)   # 或 model/deepseek.md
@@ -97,6 +101,13 @@ printf '读一下 a.txt，统计行数\n' | ./build/agent-cli --tools all --work
 - **`test_s3a.py::test_layering` 是按字面 grep 的**：连注释里出现 `httplib` 都会红。
   想不红就去掉那个词（改成"HTTP 客户端"），别改测试。
 - **`demo.chat` 不合批**：S2 的验收是"一个 delta 恰好一个码点"，新阶段不许偷偷改老契约。
+- **压缩会改 `history_` 的长度，所以 `history_mark` 必须跟着往下挪**（否则失败回滚时 `resize` 会把历史撑大）。
+- **压缩不许把历史变大**（摘要的固定开销在小对话里可能超过原文）：压完要量一下，不划算就放弃。
+  副作用是短对话永远不压缩——那是**正确行为**。
+- **"检索类结果永不压缩"只能按轮实现**：只留 `tool` 消息、折叠掉它上面的 `assistant(tool_calls)`，
+  就是孤儿 tool 消息 → 对端 400。
+- **摘要识别靠前缀 `[压缩]`**：旧摘要必须"搬运正文"，不能再折叠一次（套娃会让 token 反而上升）。
+- **单元测试的 `check(name, cond, detail)` 里 detail 是无条件求值的**：别在里面写会越界的 `substr`。
 - **模型是无状态的：每次请求都要把整段 `messages` 重新发。**
 
   系统提示词在 `history_[0]`（`--system` 或内置 agent 提示词），不是每次现拼。

@@ -68,6 +68,8 @@ class PipeSession : public Session {
     if (!opts.system_prompt.empty()) args.push_back("--system=" + opts.system_prompt);
     args.push_back("--max-steps=" + std::to_string(opts.max_steps));
     args.push_back("--delta-batch-ms=" + std::to_string(opts.delta_batch_ms));  // S5：合批窗口
+    args.push_back("--max-context-tokens=" + std::to_string(opts.max_context_tokens));  // S6：预算
+    args.push_back("--keep-recent-turns=" + std::to_string(opts.keep_recent_turns));    // S6：保留轮数
 
     int to_core[2], from_core[2];
     if (::pipe(to_core) != 0 || ::pipe(from_core) != 0) throw std::runtime_error("pipe() failed");
@@ -253,6 +255,8 @@ void usage() {
                "  --max-steps N       透传给 core：一个 turn 里最多几次模型调用（默认 8）\n"
                "  --system TEXT       透传给 core：系统提示词（不给时有工具就用内置 agent 提示词）\n"
                "  --delta-batch-ms N  透传给 core：增量合批窗口（默认 30，0 = 一增量一帧）\n"
+               "  --max-context-tokens N  透传给 core：上下文预算（默认 32000，0 = 不压缩）\n"
+               "  --keep-recent-turns N   透传给 core：压缩时最近几轮原样保留（默认 3）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
                "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
@@ -305,6 +309,10 @@ int main(int argc, char** argv) {
       cli.core_opts.max_steps = std::max(1, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--delta-batch-ms", v))
       cli.core_opts.delta_batch_ms = std::max(0, std::atoi(v.c_str()));
+    else if (opt_value(argc, argv, i, "--max-context-tokens", v))
+      cli.core_opts.max_context_tokens = static_cast<size_t>(std::max(0, std::atoi(v.c_str())));
+    else if (opt_value(argc, argv, i, "--keep-recent-turns", v))
+      cli.core_opts.keep_recent_turns = std::max(1, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
     else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
@@ -380,6 +388,15 @@ int main(int argc, char** argv) {
         return;
       }
 
+      if (name == "context.compacted") {  // S6：上下文被压过。只跟人说话，不污染 stdout
+        std::cerr << "[context] 已压缩 ~" << payload.value("before_tokens", 0) << " -> ~"
+                  << payload.value("after_tokens", 0) << " tokens（预算 " << payload.value("budget", 0)
+                  << "；折叠 " << payload.value("summarized_turns", 0) << " 轮 / "
+                  << payload.value("dropped_messages", 0) << " 条；裁剪工具结果 "
+                  << payload.value("truncated_tool_results", 0) << " 条）\n" << std::flush;
+        return;
+      }
+
       if (name == "tool.result") {  // S4：工具跑完了——ok/error 与耗时
         std::cout << " -> " << (payload.value("ok", false) ? "ok" : "error");
         if (!payload.value("ok", false)) std::cout << " (" << payload.value("error", "") << ")";
@@ -419,7 +436,9 @@ int main(int argc, char** argv) {
       }
       std::cout << "[turn " << res.value("turn_id", "?") << " done: stop_reason="
                 << res.value("stop_reason", "?");
-      if (res.contains("usage") && res["usage"].is_object()) {
+      // S6 顺手修：core 总是塞 "usage" 字段，所以 contains() 恒真——对端不给 usage 时会打印
+      // tokens=0/0/0，把"未知"显示成"零"。改成看内容：空对象 = 不知道，就别编数字。
+      if (res.contains("usage") && res["usage"].is_object() && !res["usage"].empty()) {
         const json& u = res["usage"];
         std::cout << ", tokens=" << u.value("prompt_tokens", 0) << "/" << u.value("completion_tokens", 0)
                   << "/" << u.value("total_tokens", 0);
