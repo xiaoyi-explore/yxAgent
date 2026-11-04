@@ -1,10 +1,21 @@
 # manual —— 从零实现一个「简化但完整」的 Agent
 
+> ## ⚠️ 这是 v1 设计稿，只保留"为什么"
+>
+> 本文写于项目动工之前（2026-10 初稿）。它现在的价值只有一条：**架构、协议、选型为什么这么定**。
+>
+> - **阶段划分已作废**：本文原来的「九个阶段（S0–S8）」被 v2 取代。现行计划是
+>   [`docs/roadmap.md`](roadmap.md) 的 **S0–S11**（S3 拆成 S3a/S3b，共 13 个 tag）。
+>   **tag 名的含义一律以 roadmap 为准**——比如 v1 的 `s8` 是"子智能体"，v2 的 `s8` 是"权限审批"。
+> - **协议现状以 [`docs/protocol.md`](protocol.md) 为准**：本文第二章只记录 S0 定稿那一刻的设计，
+>   之后 S1/S2/S3a/S3b/S4/S5/S6 又追加了帧、事件和方法。
+> - **每阶段"为什么这么做"看 [`docs/stage-*.md`](.)**，本文不再重复。
+
 > **目标**：用 C++ 实现一个 TUI Agent，代码量控制在可通读范围内，但**架构上覆盖现代 Agent 的全部核心概念**：进程边界、事件流、工具调用循环、上下文管理、压缩、权限审批、子智能体、会话持久化。
 > **适用**：了解 C++，但对 Agent 内部机制和「双进程」只是刚听说的人。
-> **学习方式**：全文分 **9 个阶段（S0–S8）**，每个阶段是一个 git tag，可 `git checkout` 切换，逐个阶段对照代码学习。
+> **读法**：本文只讲**架构 / 协议 / 选型**。阶段划分与学习顺序见 [`docs/roadmap.md`](roadmap.md)（S0–S11，S3 拆成 S3a/S3b）；每阶段的实现理由见 `docs/stage-*.md`。
 > **本文件性质**：**设计文档**。先评审，评审通过后再开工写代码。
-> **调研基础**：所有关键决策均标注了工业界出处，完整来源见 [§十一](#十一调研来源)。核心结论已与 Codex CLI / Gemini CLI / Claude Code / OpenHands / Aider 的实际实现交叉验证。
+> **调研基础**：所有关键决策均标注了工业界出处，完整来源见 [§十](#十调研来源)。核心结论已与 Codex CLI / Gemini CLI / Claude Code / OpenHands / Aider 的实际实现交叉验证。
 
 ### 一句话总纲
 
@@ -246,7 +257,7 @@ agent-tui 启动
 | HTTP | **cpp-httplib 0.60.x**（C++11 单头文件，带 OpenSSL 支持） | 内建 **SSE 客户端**（`httplib::sse::SSEClient`）与流式 content receiver，省掉手写 SSE 解析 |
 | TUI | **FTXUI 7.x** | MIT、C++17、**零外部依赖**、声明式 Element 树、内建事件循环 |
 | 并发 | `std::jthread` + 一条 IO 线程 + 一条 Agent 线程 | 学习阶段不引入 Asio |
-| 测试 | Catch2 / doctest + **假 LLM server** | 见 §五 |
+| 测试 | Catch2 / doctest + **假 LLM server** | 见 roadmap 的 DoD |
 
 **几个选型要点（已核实）**：
 
@@ -263,277 +274,39 @@ agent-tui 启动
 
 ---
 
-## 四、九个阶段（git tag 可直接 checkout）
+## 四、阶段划分（已作废，现行版见 `docs/roadmap.md`）
 
-> 每个阶段都遵循：**能跑 → 能看 → 能测**。tag 命名 `s0`…`s8`。
-> 「新增概念」一栏就是这一阶段你**应该学会的东西**。
+本文初稿分的是 **9 个阶段（S0–S8）**，**现在作废**。v2 把它重排成 12 个阶段、13 个 tag
+（S3 拆成 S3a/S3b），理由写在 roadmap §一：**一次只加一个未知数**。
 
-### S0 —— 双进程骨架与协议
+差别最大的两处：
 
-| 项 | 内容 |
+- v1 的 **S1 是"TUI 外壳"** —— v2 把 TUI 挪到 **S9**：先有真实事件，再画界面；
+  否则你只能对着假数据调布局，学不到东西还占时间。
+- v1 的 **S3 是"Agent 循环与工具"** —— v2 拆成 **S3a（真模型，先不流式）→ S3b（SSE 流式）→ S4（工具循环）**。
+
+| v1（作废） | v2（现行） |
 |---|---|
-| **tag** | `s0` |
-| **新增概念** | 进程边界、协议先行、NDJSON 分帧、事件序列号 |
-| **交付物** | `docs/protocol.md`；`agent-core` 能 spawn、握手、回显；`agent-cli` 极简（无 TUI，纯 stdin/stdout）；**`--embedded` 开关**（同进程直连，不经管道） |
-| **验证** | `echo 'hi' \| ./agent-cli` 与 `echo 'hi' \| ./agent-cli --embedded` **输出完全一致**；`--log-raw` 能看到双向报文 |
-| **刻意不做** | LLM、工具、TUI |
-
-**关键点**：`--embedded` 不是花架子，它是你的**调试利器**——当双进程出问题时，用它一次就能判断「是协议/传输的锅，还是 Agent 逻辑的锅」，**一次只调一个未知数**。这正是 Codex `InProcessAppServerClient` / `RemoteAppServerClient` 的设计意图。
-
-这是你手册里 s0 的忠实实现，但**多了两样东西**：一份协议文档，和一个内嵌模式。协议先行是双进程架构能否活下去的关键。
-
----
-
-### S1 —— TUI 外壳（还是假数据）
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s1` |
-| **新增概念** | 事件驱动 UI、视图状态与真相状态分离、流式节流 |
-| **交付物** | FTXUI 界面：输入框 + 消息列表 + 状态栏；`agent-cli` 改名 `agent-tui` |
-| **验证** | core 内置 `demo.stream` 命令，逐字吐 delta；UI 打字机效果不卡键盘 |
-| **关键点** | tui 只消费事件，**不认识 HTTP / 工具 / 上下文** |
-
-**要刻意体会的**：core 从来没有给 tui 发过「渲染好的字符串」。tui 收到的是 `assistant.delta`，它自己决定怎么画。
-
-**FTXUI 的线程安全交接点（关键 API）**：TUI 主循环跑在一条线程上，而 IPC 读帧跑在另一条线程。**绝不能在 IPC 线程里直接改 UI 状态**。正确做法：
-
-```cpp
-// IPC 线程收到一帧后：
-screen.PostEvent(ftxui::Event::Custom);   // 线程安全：入队并唤醒主循环
-// 或携带数据：
-screen.Post([&]{ messages.push_back(msg); });   // 任务在主循环线程执行，无数据竞争
-```
-
-注意 FTXUI 中 `ScreenInteractive` 现在是 `App` 的别名（`using ScreenInteractive = App;`），API 在 `App` 上。
-
----
-
-### S2 —— 真正接上 LLM（Provider 抽象）
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s2` |
-| **新增概念** | Provider 抽象、SSE 流式解析、消息模型（role/content）、错误与重试 |
-| **交付物** | `Provider` 接口 + `OpenAICompatProvider`（可指向 OpenAI / DeepSeek / 本地 vLLM）；SSE 增量解析；`agent-core --base-url` 配置 |
-| **验证** | 与模型完成一次多轮闲聊；CI 里用**假 LLM server** 保证确定性 |
-| **关键点** | **还没有工具**。此时它是一个「聊天机器人」，不是 Agent |
-
-**假 LLM server 是本阶段最重要的工程动作**：一个基于 `httplib::Server` 的本地 server，回放 `tests/fixtures/*.sse` 脚本。有了它，之后每个阶段都能自动化测试。
-
-**必须覆盖的 fixture（每一条都对应一类真实 bug）**：
-
-| fixture | 验证什么 |
-|---|---|
-| 正常多轮 | 基线 |
-| **chunk 切在 JSON 事件中间** | TCP/TLS 会任意分片，**绝不能假设一次 read 等于一个事件** |
-| **chunk 切在 UTF-8 码点中间** | 中文流式输出必踩；多字节字符被劈成两半 |
-| `:` 开头的注释行 | OpenAI 的 keep-alive ping，必须忽略 |
-| **tool_call arguments 分 3 片到达** | 见 S3 的坑 |
-| 慢速流（事件间 sleep 50ms） | TUI 节流逻辑与界面不卡 |
-| 401 / 429 / 500 / 中途断连 | 错误处理与 SSE 重连 |
-
-### SSE 增量解析的正确算法（无论用不用库都要懂）
-
-用到 `cpp-httplib` 的 `SSEClient` 时它会帮你解析，但**理解这个算法**能让你在出问题时知道去哪找：
-
-1. 维护一个 `std::string buffer`，把每个到达的 chunk **原样追加**。
-2. **绝不假设 chunk 落在事件边界上**——一次 read 里可能有半个事件，也可能有三个半。
-3. 在 buffer 里找**完整的事件终止符**（空行）。注意规范允许 `\r\n`、`\n`、`\r` 三种行尾，要先归一化。
-4. 块内按 `field: value` 处理：冒号后的一个前导空格要剥掉；`:` 开头的行是注释（OpenAI 的 ping）**要忽略**；多个 `data` 行是**用换行拼接**而不是替换。
-5. 在空行处派发事件，然后 **`erase` 掉已消费的前缀——不要 `clear()` 整个 buffer**，否则会丢掉下一个事件的开头。
-
-> 权威定义：[WHATWG HTML Standard §9.2 Parsing an event stream](https://html.spec.whatwg.org/multipage/server-sent-events.html)
-
----
-
-### S3 —— Agent 循环与工具调用（真正的 Agent 诞生）
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s3` |
-| **新增概念** | ReAct / tool-calling 循环、工具注册表、JSON Schema 参数、结果回灌、循环终止条件 |
-| **交付物** | `Tool` 接口 + 3 个工具：`read_file`、`write_file`、`run_shell`；消息历史里正确插入 tool 结果；`turn` 状态机 |
-| **验证** | 「读 a.txt 并统计行数」能自动完成；单轮内多次工具调用的多步推理 |
-| **关键点** | 循环必须有**硬上限**（最大步数 / 最大 token / 墙钟超时），否则会失控 |
-
-```
-Agent Loop（turn 内部）
-  loop:
-    resp = provider.chat(messages, tools)
-    if resp 无 tool_calls:  → 输出最终答复，turn 结束
-    for each call:
-        emit tool.call
-        result = registry.execute(call)   ← 结构化结果，不是字符串
-        messages += tool_message(call.id, result)
-        emit tool.result
-    if steps > MAX_STEPS → 中止并报错
-```
-
-**呼应 §1.2 的第一条**：`registry.execute` 返回的是带 `ok/output/error` 的**结构化事实**；把它渲染成人话是 tui 或 prompt 模板的事。
-
-### ⚠️ S3 最容易踩的坑（务必先知道）
-
-**OpenAI 兼容接口的 `tool_calls[].function.arguments` 是分片到达的。**
-
-流式响应里，工具调用的参数 JSON **不是一个完整字符串**，而是被切成多个 delta 片段：
-
-```
-chunk1: {"index":0,"function":{"name":"read_file","arguments":"{\"pa"}}
-chunk2: {"index":0,"function":{"arguments":"th\":\"a.tx"}}
-chunk3: {"index":0,"function":{"arguments":"t\"}"}}
-```
-
-必须**按 `index` 累积拼接**，直到 `finish_reason == "tool_calls"` 才能 `json::parse`。直接对单个 delta 解析会抛异常。
-
-这是 C++ Agent 客户端里**最常见的一个 bug**。配套的测试用例（见 S2 的假 LLM server）：准备一个 fixture，让 `arguments` 分 3 片到达，断言拼完能解析。
-
----
-
-### S4 —— 流式、取消与并发
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s4` |
-| **新增概念** | 背压与节流、取消语义、线程模型、工具并发执行 |
-| **交付物** | `assistant.delta` 节流（~30ms 合批）；`turn.cancel` 请求；只读工具并行、写工具串行；core 内部无阻塞 IO |
-| **验证** | 长回答期间按 Esc 能立刻停下；多个 `read_file` 并行 |
-| **关键点** | 取消要能穿透到 HTTP 层（中断 SSE 读取），不能只设置一个标志位 |
-
-这是「PTY 行规程决定中断语义」的对应物：**取消语义由 session 层定义，不由 UI 层定义**。
-
----
-
-### S5 —— 上下文管理、预算与压缩
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s5` |
-| **新增概念** | token 预算、上下文窗口、压缩（compaction）、工具结果裁剪、token 估算 |
-| **交付物** | `ContextManager`：token 估算 → 阈值检测 → 摘要压缩 → 发 `context.compacted` 事件；大工具结果截断 |
-| **验证** | 灌入超长对话，观察自动压缩后仍能回答早期事实 |
-| **关键点** | 压缩是**有损**的，必须保留：用户原始意图、当前任务状态、未完成事项 |
-
-**工业界的两种压缩策略**（都要知道，实现一种即可）：
-
-| 策略 | 代表 | 做法 | 特点 |
-|---|---|---|---|
-| **摘要（summarize）** | Gemini CLI `ChatCompressionService` | 达阈值后让模型总结，保留最近 N 轮完整 | 保信息，但多一次模型调用 |
-| **重置（reset）** | Codex `compact_token_budget.rs` | **不做摘要**，直接装一个全新上下文窗口 | 快、省 token，但丢历史 |
-
-**可以直接抄的具体参数**（Gemini CLI 实测值）：
-- 阈值 = 模型上限的 **50%**（`DEFAULT_COMPRESSION_TOKEN_THRESHOLD = 0.5`）——**不要等到 95% 才压**。
-- **保护最近 3 轮**完整不动（`RECENT_TURNS_PROTECTED = 3`）。
-- **检索类工具的返回永不被压缩**（`read_file`、`grep`、`glob` 等）——否则模型会反复重读同一文件。
-- 较老的工具返回**截断到 2KB**（`COLLAPSED_FUNCTION_RESPONSE_MAX_BYTES = 2048`）。
-
-**天花板在哪**：Claude Code 2.1.169 的压缩已是多路径状态机——自动、微型（清理工具结果）、**预计算**（用户还在打字时后台先算好摘要）、反应式，外加**熔断器**（连续失败则停止尝试）与**快速回填断路器**（上下文反复迅速涨满时抑制压缩）。
-
-**你的简化版只需做三件事**：阈值检测 + 摘要压缩 + 保护最近 N 轮。但要知道天花板在哪。
-
-**另一个必知概念——context rot**（Anthropic）：上下文越长，模型的**召回能力越差**，且这在所有模型上都存在。所以压缩不只是「省钱」，更是**保效果**。
-
----
-
-### S6 —— 会话持久化、恢复与多前端
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s6` |
-| **新增概念** | transcript 落盘、会话恢复、传输可替换、headless 模式 |
-| **交付物** | `~/.agent/sessions/<id>.jsonl` 追加写；`session.load` / `session.resume`（按 `seq` 补齐）；`agent-core --listen unix:...`；新增 `agent-run` 一次性 headless 前端 |
-| **验证** | 关掉 tui 再打开，历史还在；`agent-run "统计行数"` 无 UI 完成同一任务 |
-| **关键点** | 到这里，**双进程的全部收益才真正兑现**——同一 core，两个前端 |
-
-headless 前端是「Direct Scanout 快速路径」的对应物：简单场景绕过完整 UI 渲染。
-
----
-
-### S7 —— 权限、审批与沙箱
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s7` |
-| **新增概念** | 能力/策略模型、人在环路审批、沙箱、危险操作分级 |
-| **交付物** | `Policy`：按工具 + 参数模式决定 `allow / ask / deny`；`approval.requested` 事件与 tui 弹窗；工作目录限制；shell 超时与资源限制 |
-| **验证** | 写工作目录外文件被拒或需审批；危险命令需显式确认 |
-| **关键点** | 审批入口在 **core**，不在 tui。tui 只负责「问」和「回传答案」 |
-
-这是「合成器持有权限判定」的对应物。**权限真相必须和工具执行在同一进程**，否则前端被绕过就失守了。
-
-**三个工业界结论，直接决定你的设计：**
-
-1. **沙箱的作用是「减少审批弹窗」，而不只是「防破坏」。** Claude Code 的思路：命令一旦被 OS 级沙箱限住（只能写工作目录、网络走白名单代理），就可以**不再逐条问用户**。体验和安全的矛盾由此化解。你的 S7 应该实现「沙箱内的命令自动放行，沙箱外的命令才 ask」。
-
-2. **必须有一份「永不放行」的名单。** Codex 的 `exec_policy.rs` 明确列出**禁止被 allow-list 化的命令前缀**——因为它们能绕过一切静态检查：
-   `bash -c`、`sh -lc`、`python -c`、`node -e`、`powershell -EncodedCommand`、`cmd /c`、`sudo`、`rm` …
-   **这条规则值得直接抄**：任何「解释器 + 一段代码」的组合，静态策略都不可靠。
-
-3. **沙箱有明确的覆盖盲区。** Claude Code 官方文档写得很直白：沙箱**只**约束 shell 命令；**内置文件工具、MCP server、hooks 都跑在沙箱之外**，且原生 Windows 不支持（须 WSL2）。
-
-**对应到你的设计**：S7 的 `Policy` 应该对**每一个工具**做判定（而不只是 shell），并在文档里明确写出「哪些路径不受沙箱保护」。
-
----
-
-### S8 —— 子智能体、技能与收尾
-
-| 项 | 内容 |
-|---|---|
-| **tag** | `s8` |
-| **新增概念** | 子智能体（上下文隔离）、技能/提示词模块化、MCP 接入、可观测性 |
-| **交付物** | `task` 工具：把子任务交给一个**独立上下文的子 Agent**，只回收结论；技能文件加载；MCP client（把 MCP server 的工具并入注册表）；结构化日志与 usage 统计 |
-| **验证** | 一个「调研 → 汇总」任务用子 Agent 完成，主上下文不被污染；接入一个真实 MCP server |
-| **关键点** | 子智能体的**唯一目的**是上下文隔离——它用掉很多 token，但只把摘要还给你 |
-
-**工业界对照**：Claude Code 2.1.169 的子系统清单里，Agent Teams、Workflows（VM 沙箱内的确定性多智能体编排）、MCP（stdio/SSE/HTTP/WebSocket + OAuth）、Loops & Scheduling 都已是独立子系统。**S8 之后的路还很长，但你已经走完了主干。**
-
----
-
-## 五、阶段总览表
-
-| 阶段 | tag | 一句话 | 新增核心概念 | 代码量（估） |
-|---|---|---|---|---|
-| S0 | `s0` | 双进程能对话 | 协议、分帧、事件序列 | ~600 |
-| S1 | `s1` | 有 TUI 外壳 | 事件驱动 UI、状态分离 | ~700 |
-| S2 | `s2` | 接上真模型 | Provider、SSE、重试 | ~800 |
-| S3 | `s3` | **成为 Agent** | 工具调用循环 | ~900 |
-| S4 | `s4` | 能流式能取消 | 背压、取消、并发 | ~600 |
-| S5 | `s5` | 上下文不爆 | 预算、压缩 | ~700 |
-| S6 | `s6` | 会话能恢复、多前端 | 持久化、可替换传输 | ~700 |
-| S7 | `s7` | 不会乱来 | 权限、审批、沙箱 | ~600 |
-| S8 | `s8` | 会分工、能扩展 | 子智能体、技能、MCP | ~1000 |
-
-合计约 **6600 行**——足以覆盖主干概念，又不至于读不完。
-
-### 每阶段统一的完成定义（DoD）
-
-1. `cmake --build` 干净通过，无警告即目标。
-2. 有对应的自动化测试（假 LLM server 驱动）。
-3. `docs/protocol.md` 同步更新。
-4. 有一份 `docs/stage-sN.md`：这一阶段**为什么这么设计**、**替代方案是什么**。
-5. 打 tag，并在 README 的「学习路径」表里登记。
-
-### 强烈建议：transcript 录制 + 回放（S2 起）
-
-把每一轮都记成 **JSONL**：请求体（完整 message 数组 + 工具 schema）+ 每个原始 SSE 事件 + 时间戳。因为用了 nlohmann/json，这只是几行代码。然后：
-
-- 给 core 加一个 `replay` 模式：读录制文件，把**同样的 SSE 事件**重新灌进 IPC 通道。
-- 这样就能**零网络、确定性**地测试整条 `core → tui` 管线（含 UI 流式渲染）。
-- 因为格式是纯 NDJSON，它同时是一个**可以直接在终端里读的调试产物**——当故障是「UI 上某个字乱码了」时，这一点极其关键。
-
-> **分层铁律的 CMake 落点**：`agent_common`（静态库）**绝不链接** HTTP 库或 TUI 库。
-> HTTP 属于 core，渲染属于 tui——这一条规则就是双进程架构是否诚实的试金石。
-
----
-
-## 六、仓库结构（终态）
+| S0 双进程骨架与协议 | S0 协议设计 + S1 握手 |
+| S1 TUI 外壳 | S9 TUI |
+| S2 接上 LLM | S3a 真模型 / S3b SSE |
+| S3 Agent 循环与工具 | S4 Agent 循环 |
+| S4 流式、取消与并发 | S3b（流式）+ S5（取消与合批） |
+| S5 上下文管理与压缩 | S6 |
+| S6 持久化与多前端 | S7 |
+| S7 权限与沙箱 | S8 |
+| S8 子智能体、技能、MCP | S10（MCP）+ S11（子智能体 / skills） |
+
+**现行计划的逐阶段详解、DoD、里程碑全在 `docs/roadmap.md`；已完成阶段的设计记录在 `docs/stage-s2..s6.md`。**
+
+## 五、仓库结构（终态）
 
 ```
 new-agent/
 ├── CMakeLists.txt
 ├── docs/
 │   ├── protocol.md            # 协议唯一真相
-│   ├── stage-s0.md … s8.md    # 每阶段设计说明
+│   ├── stage-s2.md … stage-s*.md  # 每阶段设计说明
 │   └── manual.md    # 本文件
 ├── libs/
 │   ├── protocol/              # 消息结构、序列化、分帧（core/tui 共用）
@@ -550,7 +323,7 @@ new-agent/
 ├── frontends/
 │   ├── tui/                   # agent-tui
 │   └── run/                   # agent-run（headless，S6 起）
-├── mcp/                       # S8：MCP client
+├── mcp/                       # S10：MCP client
 └── tests/
     ├── fake_llm/              # 假 LLM server
     └── ...
@@ -561,7 +334,7 @@ new-agent/
 
 ---
 
-## 七、几个必须提前想清楚的坑
+## 六、几个必须提前想清楚的坑
 
 | 坑 | 后果 | 对策 |
 |---|---|---|
@@ -581,7 +354,7 @@ new-agent/
 
 ---
 
-## 八、这份设计**刻意不做**的事
+## 七、这份设计**刻意不做**的事
 
 明确边界，避免范围蔓延：
 
@@ -596,7 +369,7 @@ new-agent/
 
 ---
 
-## 九、建议的学习方式
+## 八、建议的学习方式
 
 1. **先读 `docs/protocol.md`**，它是整个系统的枢纽。
 2. `git checkout s0`，跑起来，看 `--log-raw` 的原始报文。
@@ -606,7 +379,7 @@ new-agent/
 
 ---
 
-## 十、结语：一句话记住整个架构
+## 九、结语：一句话记住整个架构
 
 > **core 是唯一持有真相（transcript / 上下文 / 权限）的 harness，tui 是它的一个可替换的呈现前端，两者之间流动的永远是结构化事件而非人类文本。**
 
@@ -614,7 +387,7 @@ new-agent/
 
 ---
 
-## 十一、调研来源
+## 十、调研来源
 
 本设计的关键决策均有出处，便于你自行核实与深挖。
 
@@ -658,7 +431,7 @@ new-agent/
 - [nlohmann/json](https://github.com/nlohmann/json) —— 最新 **v3.12.0**
 
 ### SSE 与流式解析
-- [WHATWG HTML Standard §9.2 —— Server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) —— 事件流解析的权威规范，S2 算法出处
+- [WHATWG HTML Standard §9.2 —— Server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) —— 事件流解析的权威规范，S3b 算法出处
 - [cpp-httplib —— SSE 客户端文档](https://github.com/yhirose/cpp-httplib/blob/master/README-sse.md) —— `on_message` / `start_async` / 自动重连
 - [cpp-httplib —— 流式 API 文档](https://github.com/yhirose/cpp-httplib/blob/master/README-stream.md) —— 无 keep-alive、Result 非线程安全
 - [cpr —— Server-Sent Events](https://github.com/libcpr/docs/blob/master/sse.md) —— `SetServerSentEventCallback` 的备选方案
@@ -672,7 +445,7 @@ new-agent/
 
 ---
 
-## 十二、附：配套调研文档
+## 十一、附：配套调研文档
 
 本次调研产出了两份原始报告，内容比本设计文档更细，可作为补充阅读：
 
@@ -683,5 +456,5 @@ new-agent/
 
 ---
 
-*文档版本：v1（设计稿，待评审）｜ 共 9 阶段（S0–S8），git tag 可切换*
+*文档版本：v1 设计稿（架构 / 协议 / 选型部分仍然有效）｜阶段划分已由 [`docs/roadmap.md`](roadmap.md)（v2）取代*
 

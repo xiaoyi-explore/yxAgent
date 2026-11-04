@@ -12,14 +12,14 @@
 |---|---|
 | 仓库 | `/root/project/yxAgent`（服务器 `111.228.29.170`） |
 | 分支 | `main` |
-| HEAD | tag `s7` 指向的提交 |
-| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` |
-| 测试 | `ctest` **10/10 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 28 / S6 端到端 31 / S7 10 组 107 项 |
+| HEAD | tag `s6` 指向的提交 |
+| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` |
+| 测试 | `ctest` **9/9 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 28 / S6 端到端 31 |
 | 工作区 | 干净（`.cache/`、`build/`、`model/` 已 gitignore） |
-| 正在做 | 无。S7 已收尾、已打 tag，下一个阶段是 S8 |
+| 正在做 | 无。S6 已收尾、已打 tag，下一个阶段是 S7 |
 
 **真实模型验证过的**：DeepSeek `deepseek-chat` 流式（11 增量、首字 0.57s）、工具循环
-（read_file → wc -l → 答 "5"，3 步 2.7s）。S5 的取消、S6 的压缩、S7 的 resume 是用**假 server** 验的，
+（read_file → wc -l → 答 "5"，3 步 2.7s）。S5 的取消、S6 的压缩是用**假 server** 验的，
 真模型下的手动冒烟还没做（见 §6 欠账）。
 
 ## 2. 30 秒恢复
@@ -28,7 +28,7 @@
 cd /root/project/yxAgent
 git log --oneline --decorate | head -5
 cmake --build build 2>&1 | tail -3
-cd build && ctest 2>&1 | tail -4     # 必须 10/10
+cd build && ctest 2>&1 | tail -4     # 必须 9/9
 ```
 
 全绿 = 基线完好，直接从 §5 开始。真实模型冒烟（**记得给 `--tools`**，默认不给工具）：
@@ -38,14 +38,6 @@ export DEEPSEEK_API_KEY=$(head -1 /tmp/deepseek.key.bak)   # 或 model/deepseek.
 printf '你好\n' | ./build/agent-cli --base-url https://api.deepseek.com --model deepseek-chat
 printf '读一下 a.txt，统计行数\n' | ./build/agent-cli --tools all --workdir /tmp/s4cli \
        --base-url https://api.deepseek.com --model deepseek-chat
-
-# S7：同一会话关掉再开；agent-run 是一次性 headless
-printf '第一句\n' | ./build/agent-cli --session demo --session-dir /tmp/s7sessions \
-       --base-url https://api.deepseek.com --model deepseek-chat
-printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions \
-       --base-url https://api.deepseek.com --model deepseek-chat
-./build/agent-run --tools all --workdir /tmp/s4cli --session demo --session-dir /tmp/s7sessions \
-       --base-url https://api.deepseek.com --model deepseek-chat "统计 a.txt 的行数"
 ```
 
 ## 3. 文档地图（只查一处）
@@ -55,8 +47,9 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 | `README.md` | 项目是什么、怎么跑、阶段进度、铁律 |
 | `docs/protocol.md` | 线上到底发什么帧 + 每阶段追加的不变量 |
 | `docs/responsibilities.md` | 谁拥有什么职责、逐阶段代码地图 |
-| `docs/stage-s2..s7.md` | 这些阶段**为什么**这么设计、替代方案、踩的坑 |
-| `docs/roadmap.md` | 阶段计划与 DoD（S0–S11；S8 的细节在那一节） |
+| `docs/stage-s2..s6.md` | 这些阶段**为什么**这么设计、替代方案、踩的坑 |
+| `docs/roadmap.md` | 阶段计划与 DoD（S0–S11；S7 的细节在那一节） |
+| `docs/manual.md` | **v1 设计稿**：架构/协议/选型的"为什么"。它的阶段划分**已作废**，别照它学 |
 | **本文件** | **现在在哪、下一步、怎么验证、有哪些坑** |
 
 > S0/S1 没有单独的设计记录：S0 的设计就是 `protocol.md` 本身，S1 的记录在
@@ -74,34 +67,35 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 | `s4` | 工具 + ReAct 循环 | `tool.call`/`tool.result` 按 `call_id` 一一配对；`arguments` 坏 JSON 不许抛 |
 | `s5` | `turn.cancel`（穿透到 HTTP）+ 30ms 合批 | 取消**不回滚**已产出的部分；吐过字不重试 |
 | `s6` | 上下文预算与三级压缩 + `context.compacted` | 压缩只动 `history_`，不改协议；`history_mark` 跟着往下挪 |
-| `s7` | 会话日志 + `session.load`/resume + `agent-run` | 会话文件只追加；恢复重建 `history_`（含 `[压缩]`）；带会话 `seq` 续号；一个会话一个写者；`agent-run` 只靠协议 |
 
-## 5. 下一步（S8：权限、审批与沙箱，~400 行）
+## 5. 下一步（S7：会话持久化、恢复与 headless，~400 行）
 
-**目标**：模型要写工作目录外的文件、跑 `rm -rf` 时，core 能 allow / ask / deny；
-审批往返走协议，前端只负责问和回传答案。
+**目标**：关掉 cli 再打开，历史还在；并且出现**第二个前端** `agent-run`，
+它只靠协议就能无界面跑完同一个任务——这是"双进程架构真正兑现"的那一刻。
 
-交付物（细节读 `docs/roadmap.md` 的 S8 节）：
+交付物（细节读 `docs/roadmap.md` 的 S7 节）：
 
-1. `Policy`：按工具 + 参数决定 allow/ask/deny；危险命令黑名单；workdir 边界。
-2. 协议：`approval.requested` 事件 + `approval.respond` 方法；超时/拒绝都要有结构化结果。
-3. 工具执行前接 Policy；S7 的会话日志要把审批结果落盘（先想清楚 commit/abort 语义）。
-4. cli 行内 `y/n`；`--approval` 策略开关；`agent-run` 在无人值守下不能挂起
-   （默认 deny 或 `--approval never`）。
+1. `~/.agent/sessions/<id>.jsonl` 追加写。**格式就用协议帧的 NDJSON**（一行一帧，与 `--log-raw` 同族），
+   理由：帧是真相，直接存帧比存"解析后的消息"更能复现问题。
+2. `session.load` / `resume`：按 `seq` 补齐历史；恢复后 `seq` 从最后一条继续，不许重号。
+3. `--session <id>` 开关（core）；cli 支持 `--resume`。
+4. 新可执行 `agent-run "<prompt>"`：一次性 headless 前端，跑完把结果打到 stdout 后退出。
 
-两条工业界结论直接抄：
+**开始前必须知道的三件事**：
 
-1. **"解释器 + 一段代码"永不 allow-list**：`bash -c`、`sh -lc`、`python -c`、`node -e`、
-   `sudo`、`rm` …（Codex `exec_policy.rs`）。
-2. **审批判定在 core**：tui/cli 只负责问和回传；前端被绕过也不能失守。
+1. **落盘格式一旦写出去就是协议的一部分**：改格式 = 改协议。先想"三个月后的你还读得懂吗"。
+2. **恢复要能重建 `history_`，包括 S6 的摘要**（摘要就是一条 `role:"user"`、以 `[压缩]` 开头的普通消息，
+   天然能存能读）；但恢复后**预算要重新算**（`usage` 从 0 开始）。
+3. **`agent-run` 必须只靠协议活**：它要是需要任何"只有 cli 才知道"的东西，
+   说明前面某阶段的耦合没清干净——**先修耦合，再写前端**。
 
 验收（DoD）：
 
-- [ ] `rm -rf /` / 越界 write 被 deny，模型收到可行动错误
-- [ ] ask 时前端往返一次，allow 后工具执行；deny 不执行
-- [ ] `agent-run` 在无人值守下不挂起（默认 deny 或 `--approval never`）
-- [ ] 审批结果进会话日志；S1–S7 十套仍全绿（新增 `tests/test_s8.py`）
-- [ ] `protocol.md` §9 S8、`docs/stage-s8.md`、刷新本文件、打 tag `s8`
+- [ ] 关掉 cli 再开（同 `--session`），历史还在，且能接着上一句问
+- [ ] `agent-run "统计 a.txt 的行数"` 无界面完成任务，退出码 0
+- [ ] 同一 core 二进制，两个前端，**零改动**（不新增"只有某个前端用"的字段）
+- [ ] S1–S6 九套测试仍全绿（新增 `tests/test_s7.py`）
+- [ ] `protocol.md` §9 S7、`docs/stage-s7.md`、刷新本文件、打 tag `s7`
 
 ## 6. 欠账（明确推掉的，别忘）
 
@@ -110,9 +104,6 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 - **`--embedded` 不支持取消**：同步回调、单线程，没有"等响应时还能读输入"的窗口。
 - **真模型的取消 / 压缩冒烟**没做（只跑了假 server）。
 - **模型摘要**（真让 LLM 写摘要）：S6 只做了抽取式，见 `docs/stage-s6.md` §5。
-- **S7 的崩溃恢复是 lean 版**：只在轮末 `session.commit`，轮中 SIGKILL 会丢掉整轮
-  （包括 user 消息）。DSH 式"模型请求前 / 工具副作用前 checkpoint + `TOOL_OUTCOME_UNKNOWN`"
-  留给 S8；做之前先想清楚审批结果怎么和 commit 对齐。
 
 ## 7. 坑与约束（踩过的，别再踩）
 
@@ -162,17 +153,6 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 - **"检索类结果永不压缩"只能按轮实现**：只留 `tool` 消息、折叠掉它上面的 `assistant(tool_calls)`
   就是孤儿 tool 消息 → 对端 400。
 - 摘要识别靠前缀 `[压缩]`；旧摘要要"搬运正文"，不能再折叠一次（套娃会让 token 反而上升）。
-
-**会话 / 持久化（S7）**
-
-- **会话文件不是 `--log-raw` 的替身**：`session.*` 记录才是恢复真相，帧只做审计和 seq 水位。
-  system prompt 和 `[压缩]` 摘要都**不在线上帧里**，别想着从帧重放 history。
-- **只有 `event` 帧带 `seq`**，`session.*` 不带；同一个文件里 seq 必须唯一且严格递增。
-- **一轮一行 commit**（原子提交）；失败轮只写 `session.abort`，不写消息。压缩过的轮用
-  `checkpoint` 全量替换，不再追加——S6 的 `history_` 是可变 vector，不是 DSH 的 surface 投影。
-- **一个会话一个写者**（`flock`）。第二个进程是 `SESSION_BUSY`，不是"两份日志合并"。
-- `session.load` 的请求帧不落盘（切换会话时它属于旧会话）；response 落到新会话。
-- `tests/fake_llm_tools.py` 的 `messages_full` 是 S7 **追加**的字段；老行为不许动。
 
 **测试**
 
