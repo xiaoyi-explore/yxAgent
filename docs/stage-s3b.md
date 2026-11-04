@@ -1,6 +1,6 @@
 # S3b —— 升级成 SSE 流式（里程碑 M2）
 
-> 上游计划：`new-agent-stages-v2.md` 的 S3b 节。本文件记录**为什么这么设计、替代方案、踩了什么坑**。
+> 上游计划：`roadmap.md` 的 S3b 节。本文件记录**为什么这么设计、替代方案、踩了什么坑**。
 > 协议变化见 `docs/protocol.md` §9 S3b。现在在哪 / 下一步见 `docs/HANDOFF.md`。
 
 ---

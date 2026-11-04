@@ -1,4 +1,4 @@
-# new-agent-manual —— 从零实现一个「简化但完整」的 Agent
+# manual —— 从零实现一个「简化但完整」的 Agent
 
 > **目标**：用 C++ 实现一个 TUI Agent，代码量控制在可通读范围内，但**架构上覆盖现代 Agent 的全部核心概念**：进程边界、事件流、工具调用循环、上下文管理、压缩、权限审批、子智能体、会话持久化。
 > **适用**：了解 C++，但对 Agent 内部机制和「双进程」只是刚听说的人。
@@ -534,7 +534,7 @@ new-agent/
 ├── docs/
 │   ├── protocol.md            # 协议唯一真相
 │   ├── stage-s0.md … s8.md    # 每阶段设计说明
-│   └── new-agent-manual.md    # 本文件
+│   └── manual.md    # 本文件
 ├── libs/
 │   ├── protocol/              # 消息结构、序列化、分帧（core/tui 共用）
 │   └── common/                # 日志、错误、结果类型
@@ -678,8 +678,8 @@ new-agent/
 
 | 文件 | 内容 |
 |---|---|
-| [agent-architecture-brief.md](./agent-architecture-brief.md) | 进程模型、Agent 循环、Harness 组件、IPC 选项的完整调研（含 Codex/Gemini/Claude Code 源码级引用） |
-| [cpp-tui-agent-stack.md](./cpp-tui-agent-stack.md) | C++ 技术选型详报：HTTP/SSE、JSON、TUI、IPC、构建系统、测试策略，含可直接用的 CMakeLists |
+| [architecture-brief.md](./architecture-brief.md) | 进程模型、Agent 循环、Harness 组件、IPC 选项的完整调研（含 Codex/Gemini/Claude Code 源码级引用） |
+| [tech-stack.md](./tech-stack.md) | C++ 技术选型详报：HTTP/SSE、JSON、TUI、IPC、构建系统、测试策略，含可直接用的 CMakeLists |
 
 ---
 

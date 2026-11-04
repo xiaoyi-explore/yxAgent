@@ -1,6 +1,6 @@
 #pragma once
 // agent_common —— 两个进程共同遵守的协议工具。
-// 铁律（new-agent-stages-v2.md 第三章）：本库绝不链接 HTTP 库或 TUI 库。
+// 铁律（docs/roadmap.md 第三章）：本库绝不链接 HTTP 库或 TUI 库。
 #include <nlohmann/json.hpp>
 #include <cstdint>
 #include <string>
