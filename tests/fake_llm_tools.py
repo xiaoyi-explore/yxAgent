@@ -227,6 +227,19 @@ class Handler(BaseHTTPRequestHandler):
             "system_count": sum(1 for m in messages if m.get("role") == "system"),
             "roles": [m.get("role") for m in messages],
             "has_tool_calls_in_history": any(m.get("tool_calls") for m in messages),
+            # S7：恢复验收看的是"模型到底收到了什么"（只追加字段，不改已有行为）。
+            "messages_full": [
+                {"role": m.get("role"),
+                 "content": (m.get("content") or "")[:400],
+                 "tool_calls": [
+                     {"id": tc.get("id"), "name": (tc.get("function") or {}).get("name"),
+                      "arguments": (tc.get("function") or {}).get("arguments")}
+                     for tc in (m.get("tool_calls") or [])
+                 ],
+                 "tool_call_id": m.get("tool_call_id"),
+                 "name": m.get("name")}
+                for m in messages
+            ],
         })
 
         done = (last_role == "tool")

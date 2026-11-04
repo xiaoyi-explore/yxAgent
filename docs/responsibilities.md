@@ -15,7 +15,7 @@
 | Agent 循环（turn 状态机，ReAct + MAX_STEPS） | 循环是协议语义，不是 UI 语义 | S4 | ✅ |
 | 取消与节流 | 取消要穿透到 HTTP 层 | S5 | ✅ |
 | token 预算与压缩（`ContextManager`） | 只有 core 知道历史有多长；压缩是"认知"的活，不是 UI 的活 | S6 | ✅ |
-| 会话持久化 | 落盘格式是协议的一部分 | S7 | 🔜 |
+| 会话持久化（`SessionStore`） | 落盘格式是协议的一部分；恢复要重建 `history_` | S7 | ✅ |
 | 审批判定（allow/ask/deny） | 前端被绕过也不能失守 | S8 | 🔜 |
 
 ## agent-cli / agent-tui（脸，只消费事件）
@@ -28,6 +28,15 @@
 | 把 `assistant.delta` 渲染成打字机效果（逐帧 flush） | core 从不发"渲染好的字符串" | S2 | ✅ |
 | 审批弹窗（只负责"问"和"回传答案"） | 决策在 core | S8 | 🔜 |
 | TUI 主循环与事件队列 | FTXUI 的线程模型要求 | S9 | 🔜 |
+
+## agent-run（headless 前端，S7）
+
+| 职责 | 为什么在 agent-run | 引入阶段 | 状态 |
+|---|---|---|---|
+| spawn core + 握手 + `chat` | 和 cli 完全同一条协议路径 | S7 | ✅ |
+| stdout 最终答复 / stderr 进度 | 机器消费要干净输出 | S7 | ✅ |
+| `--session` / `--resume` | 一次性任务也要能接上历史 | S7 | ✅ |
+| **不 include core、不链 `agent_core_lib`** | 证明"同一 core，两个前端"没有偷偷 `--embedded` | S7 | ✅ |
 
 ## 铁律（每阶段 DoD 检查）
 
@@ -45,6 +54,8 @@
 6. **工具只在 core 里执行。** 前端只看得见 `tool.call` / `tool.result` 两个事件，
    永远不碰文件系统、不执行命令；`src/core/tools.cpp` 自己也不认识 HTTP。
    靠测试守：`tests/test_s4.py::test_layering`。
+7. **`agent-run` 只链接 `agent_common`，不碰 `agent_core_lib` / httplib / OpenSSL。**
+   它是第二个前端，不是 core 的第二个入口；靠 `tests/test_s7.py` 的 grep 守。
 
 ## S1 代码地图
 
@@ -85,6 +96,17 @@
 | `src/core/core_engine.cpp` | +30 | 每个 step 进模型前压一次；发 `context.compacted`；`history_mark` 跟着往下挪 |
 | `tests/context_test.cpp` | ~250 | 纯单元测试（只链 `context.cpp`）：配对、豁免、兜底、不许变大，共 28 项 |
 | `tests/test_s6.py` | ~200 | 端到端：事件、`/__last` 里的压缩后请求、关压缩、cli 不再编造 tokens |
+
+## S7 代码地图
+
+| 文件 | 行数级 | 内容 |
+|---|---|---|
+| `src/core/session.hpp` / `.cpp` | ~90 / ~430 | `SessionStore`：NDJSON 追加写、header/checkpoint/commit/abort、flock 单写者、`last` 指针、恢复时按记录重建 `history_` |
+| `src/core/core_engine.cpp` | +120 | attach/load 会话、`session.load`、`log()` 顺带落帧、轮末 commit / 失败 abort、压缩 checkpoint |
+| `src/core/main.cpp` | +35 | `--session` / `--resume` / `--session-dir` + 错误退出码 |
+| `src/cli/main.cpp` | +30 | 透传会话开关、握手后显示 `[session] resumed/new` |
+| `src/run/main.cpp` | ~300 | `agent-run`：最小协议客户端 + 最终答复输出；只链 `agent_common` |
+| `tests/test_s7.py` | ~520 | 10 组：格式、历史、seq/turn、压缩摘要、工具历史、失败轮、崩溃、session.load、cli、agent-run |
 
 ## S4 代码地图
 

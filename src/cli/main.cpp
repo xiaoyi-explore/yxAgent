@@ -70,6 +70,10 @@ class PipeSession : public Session {
     args.push_back("--delta-batch-ms=" + std::to_string(opts.delta_batch_ms));  // S5：合批窗口
     args.push_back("--max-context-tokens=" + std::to_string(opts.max_context_tokens));  // S6：预算
     args.push_back("--keep-recent-turns=" + std::to_string(opts.keep_recent_turns));    // S6：保留轮数
+    if (!opts.session_id.empty()) args.push_back("--session=" + opts.session_id);       // S7：开/建会话
+    if (!opts.resume_id.empty()) args.push_back("--resume=" + opts.resume_id);          // S7：恢复指定会话
+    else if (opts.resume_latest) args.push_back("--resume");                            // S7：恢复最近会话
+    if (!opts.session_dir.empty()) args.push_back("--session-dir=" + opts.session_dir); // S7：测试用目录
 
     int to_core[2], from_core[2];
     if (::pipe(to_core) != 0 || ::pipe(from_core) != 0) throw std::runtime_error("pipe() failed");
@@ -257,6 +261,9 @@ void usage() {
                "  --delta-batch-ms N  透传给 core：增量合批窗口（默认 30，0 = 一增量一帧）\n"
                "  --max-context-tokens N  透传给 core：上下文预算（默认 32000，0 = 不压缩）\n"
                "  --keep-recent-turns N   透传给 core：压缩时最近几轮原样保留（默认 3）\n"
+               "  --session ID        透传给 core：开/建会话（~/.agent/sessions/<id>.jsonl）\n"
+               "  --resume[=ID]       透传给 core：恢复最近的会话，或指定已存在的 ID\n"
+               "  --session-dir DIR   透传给 core：会话目录（默认 ~/.agent/sessions）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
                "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
@@ -313,6 +320,10 @@ int main(int argc, char** argv) {
       cli.core_opts.max_context_tokens = static_cast<size_t>(std::max(0, std::atoi(v.c_str())));
     else if (opt_value(argc, argv, i, "--keep-recent-turns", v))
       cli.core_opts.keep_recent_turns = std::max(1, std::atoi(v.c_str()));
+    else if (opt_value(argc, argv, i, "--session", v)) cli.core_opts.session_id = v;
+    else if (opt_value(argc, argv, i, "--session-dir", v)) cli.core_opts.session_dir = v;
+    else if (a == "--resume") cli.core_opts.resume_latest = true;
+    else if (a.rfind("--resume=", 0) == 0) cli.core_opts.resume_id = a.substr(9);
     else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
     else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
@@ -320,6 +331,11 @@ int main(int argc, char** argv) {
     else { std::cerr << "agent-cli: too many arguments\n"; usage(); return 1; }
   }
   if (cli.core_path.empty()) cli.core_path = default_core_path(argc > 0 ? argv[0] : nullptr);
+  if (!cli.core_opts.session_id.empty() &&
+      (cli.core_opts.resume_latest || !cli.core_opts.resume_id.empty())) {
+    std::cerr << "agent-cli: --session and --resume are mutually exclusive\n";
+    return 1;
+  }
 
   std::unique_ptr<Session> session;
   try {
@@ -334,6 +350,12 @@ int main(int argc, char** argv) {
   std::cout << "[core ready] protocol=" << session->hello.value("protocol_version", "?")
             << " core=" << session->hello.value("core_version", "?")
             << " pid=" << session->hello.value("pid", 0) << "\n" << std::flush;
+  if (session->hello.contains("session") && session->hello["session"].is_object()) {
+    const json& si = session->hello["session"];
+    std::cout << "[session] " << (si.value("resumed", false) ? "resumed" : "new") << " "
+              << si.value("id", "?") << " (turns=" << si.value("turns", 0)
+              << ", last_seq=" << si.value("last_seq", 0) << ")\n" << std::flush;
+  }
 
   // 握手第二步：request hello（版本协商；成功响应即 welcome 语义）
   const json welcome = session->call("hello",

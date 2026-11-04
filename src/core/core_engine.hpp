@@ -16,6 +16,7 @@
 #include "common/protocol.hpp"
 #include "core/context.hpp"
 #include "core/provider.hpp"
+#include "core/session.hpp"
 #include "core/tools.hpp"
 
 #include <cstdint>
@@ -71,6 +72,12 @@ struct Options {
   // 默认 32000：估算是"字节/4"，中文会被低估，所以预算要留一半余量。
   size_t max_context_tokens = 32000;
   int keep_recent_turns = 3;  // 最近几轮原样保留（轮 = user + 它引发的所有消息）
+
+  // —— S7：会话持久化 ——
+  std::string session_id;      // --session <id>：打开或新建
+  std::string resume_id;       // --resume=<id>：必须已存在
+  bool resume_latest = false;  // --resume：取最近使用的会话
+  std::string session_dir;     // --session-dir；空 = ~/.agent/sessions
 };
 
 class CoreEngine {
@@ -98,6 +105,13 @@ class CoreEngine {
  private:
   void log(char dir, const std::string& frame);
 
+  // —— S7：会话接线 ——
+  void attach_session(const std::vector<Message>& initial_messages);
+  void session_turn_begin(int64_t turn);
+  void session_commit(int64_t turn, const std::string& stop_reason, const json& usage,
+                      int64_t steps, int64_t tool_calls, size_t history_mark, bool compacted);
+  void session_abort(int64_t turn, const std::string& code, bool compacted);
+
   // —— S5：stdin 的非阻塞读（只在 run() 里启用；embedded 绝不去抢 cli 的 stdin）——
   void pump_input();                        // 有多少读多少；解析出整行就立刻分发
   void dispatch_line(const std::string& line);  // 一行 -> 立刻处理 / 排队 / 取消
@@ -110,6 +124,9 @@ class CoreEngine {
   ToolRegistry tools_;                  // 空 = 模型没有手脚（S4 之前的行为）
   ContextManager ctx_;                  // S6：预算与压缩（只认 vector<Message>，不认识协议）
   std::vector<Message> history_;        // 消息历史（真相在 core）；S6 压缩、S7 落盘都从它来
+  std::unique_ptr<SessionStore> session_;  // S7：空 = 本次会话不落盘
+  std::string configured_system_;          // 启动时按 flags 组装的 system（恢复时只用于比对）
+  bool session_warned_ = false;            // 落盘失败只吵一次
   int64_t seq_ = 0;   // 事件序列号：从 1 开始、严格递增、无空洞（protocol.md §2.3）
   int64_t turn_ = 0;  // 第几轮对话（S2 只有 turn 这个概念，S3 会长大）
   bool shutdown_requested_ = false;

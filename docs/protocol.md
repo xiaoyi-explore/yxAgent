@@ -72,6 +72,8 @@
 
 `seq` 的三个用途：日志对账（肉眼找丢帧）、S7 的会话续传游标、丢帧即 bug（收到 `seq=5` 而上一帧是 `seq=3`，说明 core 有问题，直接报错而不是跳过）。
 
+> S7 起：**带会话的连接**（`--session`）从会话最后一条 `seq` 继续，见 §9 S7；不带会话的连接仍从 1 开始。
+
 ---
 
 ## 3. 消息索引
@@ -87,17 +89,18 @@
 | `echo`（方法） | cli→core | request/response | S1 | 开发期回显；S1 的主力调试消息，S2 起被 demo.chat 取代 |
 | `demo.chat`（方法） | cli→core | request/response | S2 | 假模型对话：先吐一串 `assistant.delta`，最后才回响应 |
 | `assistant.delta`（事件） | core→cli | event | S2 | 流式增量文本；一个 delta 恰好一个 UTF-8 码点 |
+| `chat`（方法） | cli→core | request/response | S3a | 真模型对话；S3b 起流式，S4 起带工具循环 |
+| `turn.cancel`（方法） | cli→core | request/response | S5 | 打断正在跑的一轮 |
+| `tool.call`（事件） | core→cli | event | S4 | 模型要求调用工具 |
+| `tool.result`（事件） | core→cli | event | S4 | 工具执行结果（`call_id` 配对） |
+| `context.compacted`（事件） | core→cli | event | S6 | 压缩通知（只报计数） |
+| `session.load`（方法） | cli→core | request/response | S7 | 打开/恢复会话；见 §9 S7 |
+| `session.*`（日志记录） | core→磁盘 | **非 wire** | S7 | header/checkpoint/commit/abort；只进会话文件 |
 
 **后续阶段将追加（占位，当前未定义，勿提前实现）**：
 
 | 消息 | 引入阶段 | 一句话 |
 |---|---|---|
-| `user.message` / `turn.*` / 真 `assistant.delta` | S3b | 流式对话（S3a 的 `chat` 是非流式前身） |
-| `tool.call` / `tool.result` | S4 | 工具循环 |
-| `turn.cancel`（方法） | S5 | 打断正在跑的一轮；本轮以 `stop_reason=cancelled` 正常结算 |
-| `turn.cancel` | S5 | 取消 |
-| `context.compacted` | S6 | 压缩通知 |
-| `session.*` | S7 | 持久化与续传 |
 | `approval.requested` / `approval.respond` | S8 | 审批往返 |
 
 ---
@@ -182,6 +185,10 @@ cli                                                core
 | `INVALID_PARAMS` | params 校验失败 | 回填 |
 | `PROTOCOL_VERSION_MISMATCH` | major 版本不兼容 | 回填；core 随后退出 |
 | `INTERNAL_ERROR` | core 内部异常 | 回填 |
+| `SESSION_NOT_FOUND` | S7：`--resume` / `session.load` 找不到会话 | 回填 |
+| `SESSION_BUSY` | S7：同一会话已被另一个进程打开（flock） | 回填 |
+| `SESSION_CORRUPT` | S7：会话文件结构坏 / seq 倒退 | 回填 |
+| `SESSION_UNSUPPORTED_VERSION` | S7：会话格式版本不认识 | 回填 |
 
 两条硬规则：
 
@@ -405,3 +412,112 @@ cli ◄─response {turn_id, text, stop_reason, usage, …} ──────�
 | 历史形态 | 压缩后 `messages` 里会出现一条 `role:"user"`、以 `[压缩]` 开头的摘要消息（在第 0 条 system 之后） |
 
 设计记录（三级压缩、轮级豁免、为什么"不许变大"、踩过的四个坑）见 `docs/stage-s6.md`。
+
+### S7 追加：`session.load` 与会话日志
+
+S7 只**追加**一个方法和一个可忽略字段；已有的帧形状一个字没改。
+会话文件不是线上帧的转储——它是"恢复真相 + 审计"的 NDJSON 日志，格式细节见
+`docs/stage-s7.md`。
+
+#### 7.1 `hello` 的 `session` 字段（纯追加）
+
+挂会话时，`event hello` 的 payload 多一个对象；老前端按 §6"未知字段忽略"处理即可。
+
+```json
+{"type":"event","seq":18,"name":"hello","payload":{
+  "protocol_version":"1.0","core_version":"0.0.1","pid":4312,
+  "session":{"id":"s1","resumed":true,"turns":4,"last_seq":17}}}
+```
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `session.id` | string | 会话 id |
+| `session.resumed` | bool | true = 本次打开的是已有会话 |
+| `session.turns` | int | 已提交的轮数（下一轮是 `turns+1`） |
+| `session.last_seq` | int | 会话日志里最后一个 event `seq`；本次连接从它 +1 继续 |
+
+不带 `--session` 的连接没有这个字段。
+
+#### 7.2 方法 `session.load`
+
+请求：
+
+```json
+{"type":"request","id":"r9","method":"session.load","params":{"id":"s1","create":true}}
+{"type":"request","id":"r10","method":"session.load","params":{"resume":true}}
+```
+
+| 参数 | 类型 | 规则 |
+|---|---|---|
+| `id` | string | 会话 id，只允许 `[A-Za-z0-9._-]`，不能含 `..`；与 `resume` 二选一 |
+| `create` | bool | 仅 `id` 模式；true = 不存在就新建，false/缺省 = 必须已存在 |
+| `resume` | bool | true = 打开最近使用的会话；目录为空则 `SESSION_NOT_FOUND` |
+
+成功响应：
+
+```json
+{"type":"response","id":"r9","ok":true,"result":{
+  "id":"s1","created":true,"resumed":false,"turns":0,"last_seq":0,
+  "path":"/root/.agent/sessions/s1.jsonl"}}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `created` | 本次是否新建了文件 |
+| `resumed` | 本次是否加载了已有历史 |
+| `turns` / `last_seq` | 恢复后的轮号 / seq 水位 |
+| `path` | 绝对路径（调试用；不含历史内容） |
+
+语义：
+
+- 成功加载后，core 的 `history_`、`turn_`、`seq_` 全部换成该会话的；
+  **前端拿不到历史内容**，只能看到计数（S6 的"上下文只在 core"继续成立）。
+- `session.load` 是事务：先成功打开新文件并拿到 flock，再替换内存状态；
+  失败保留原会话。
+- 同一个会话的单写者由 `flock(LOCK_EX|LOCK_NB)` 保证；第二个进程得到 `SESSION_BUSY`。
+- 加载**不产生** `context.compacted` 或任何历史事件；它只回一个 response。
+- `seq_` 在同一个连接内只增不减：`session.load` 到较旧的会话也不会让新事件重号。
+
+#### 7.3 会话日志（`~/.agent/sessions/<id>.jsonl`）
+
+一行一个 JSON 对象，追加写。两类记录：
+
+| 记录 | 参与恢复 | 说明 |
+|---|---|---|
+| `session.header` | 是（校验） | `v`（当前 1）、id、配置；**不含 api key** |
+| `session.checkpoint` | 是 | 全量 `messages` 快照；建会话/压缩/失败回滚时写 |
+| `session.turn.begin` | 是（轮号） | 每轮开始 |
+| `session.commit` | 是 | 一轮一条；本轮新增 `messages`，压缩过的轮带 `checkpoint` |
+| `session.abort` | 是（仅轮号/回滚） | 失败轮不写消息 |
+| `session.open` | 否 | 打开审计 |
+| `request` / `response` / `event` | 否 | 线上帧的审计副本；`seq` 水位从这里取 |
+
+恢复算法（按文件顺序）：
+
+```text
+session.checkpoint  -> history = messages
+session.commit      -> 有 checkpoint 就替换，否则追加 messages
+session.abort       -> 有 checkpoint 就替换
+session.turn.begin  -> last_turn = max(...)
+event               -> last_seq = max(...)，并要求 seq 严格递增
+```
+
+- 只有 `event` 帧带 `seq`；`session.*` 不带，所以"seq 不许重号"可以直接扫文件验证。
+- 最后一行被截断（崩溃）就丢弃；中间行坏了是 `SESSION_CORRUPT`。
+- 恢复后 `history_` 里的 `role:"user"`、以 `[压缩]` 开头的消息就是 S6 的摘要，
+  core 不需要特殊分支。
+- **预算不落盘**：token 是每次 `chat` 前从 `history_` 重新估的；`usage` 只存在
+  `session.commit` 里做审计，不从历史累加。
+
+#### 7.4 S7 的不变量
+
+| # | 不变量 |
+|---|---|
+| 1 | response 仍是本轮最后一帧；会话落盘发生在 response **之前**（先提交再确认） |
+| 2 | 恢复后的 `history_` 与崩溃前已提交的完全一致（system、摘要、tool 配对都在） |
+| 3 | 失败轮不落消息；取消轮落（半句要留下） |
+| 4 | 带会话的连接 `seq` 从 `last_seq+1` 继续；同一个文件里 `seq` 唯一且严格递增 |
+| 5 | 一个会话一个写者；第二个写者 `SESSION_BUSY` |
+| 6 | 会话日志只追加，已提交的记录永不重写 |
+
+设计记录（为什么不是纯帧、为什么一轮一行 commit、lean 版崩溃语义）见 `docs/stage-s7.md`。

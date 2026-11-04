@@ -2,6 +2,7 @@
 
 #include "core/openai_compat.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -103,29 +104,142 @@ CoreEngine::CoreEngine(Options opts)
   // 回滚用 history_.resize(history_mark)，而 mark 至少是 1，所以这条永远不会被滚掉。
   std::string system_prompt = opts_.system_prompt;
   if (system_prompt.empty() && !tools_.empty()) system_prompt = default_agent_prompt(opts_);
+  configured_system_ = system_prompt;
   if (!system_prompt.empty()) history_.push_back(Message{"system", system_prompt});
+
+  // S7：会话在构造时 attach，必须早于 greet()——这样 resume 后的 hello 也接着会话 seq。
+  attach_session(history_);
 }
 
 CoreEngine::~CoreEngine() = default;
 
+void CoreEngine::attach_session(const std::vector<Message>& initial_messages) {
+  if (opts_.session_id.empty() && opts_.resume_id.empty() && !opts_.resume_latest) return;
+
+  const std::string dir = opts_.session_dir.empty() ? default_session_dir() : opts_.session_dir;
+  const SessionHeaderConfig cfg{opts_.model, opts_.workdir, opts_.tools};
+  auto store = std::make_unique<SessionStore>(dir);
+
+  SessionOpenResult res;
+  if (!opts_.resume_id.empty())
+    res = store->open(opts_.resume_id, false, initial_messages, cfg);
+  else if (opts_.resume_latest)
+    res = store->open_latest(initial_messages, cfg);
+  else
+    res = store->open(opts_.session_id, true, initial_messages, cfg);
+
+  if (!res.created) {
+    history_ = std::move(res.messages);
+    if (!configured_system_.empty() &&
+        (history_.empty() || history_.front().role != "system")) {
+      std::cerr << "[session] warning: resumed session has no system message; the current "
+                   "--system/--tools prompt is not applied (start a new session to change it)\n";
+    }
+  }
+
+  // seq 只增不减：同一个连接里 session.load 到较旧的会话也不许回头。
+  seq_ = std::max(seq_, res.last_seq);
+  turn_ = std::max(turn_, res.turns);
+  session_ = std::move(store);
+  std::cerr << "[session] " << (res.resumed ? "resumed" : "new") << " " << res.id
+            << " (" << turn_ << " turns, seq " << seq_ << ")\n";
+}
+
+void CoreEngine::session_turn_begin(int64_t turn) {
+  if (!session_) return;
+  try {
+    session_->append_turn_begin(turn);
+  } catch (const std::exception& e) {
+    if (!session_warned_) {
+      session_warned_ = true;
+      std::cerr << "[session] warning: cannot record turn begin: " << e.what() << "\n";
+    }
+  }
+}
+
+void CoreEngine::session_commit(int64_t turn, const std::string& stop_reason, const json& usage,
+                                int64_t steps, int64_t tool_calls, size_t history_mark,
+                                bool compacted) {
+  if (!session_) return;
+  try {
+    if (compacted) {
+      session_->append_commit(turn, stop_reason, usage, steps, tool_calls, {}, &history_);
+    } else {
+      if (history_mark > history_.size()) history_mark = history_.size();
+      std::vector<Message> added(history_.begin() + static_cast<std::ptrdiff_t>(history_mark),
+                                 history_.end());
+      session_->append_commit(turn, stop_reason, usage, steps, tool_calls, added, nullptr);
+    }
+  } catch (const std::exception& e) {
+    if (!session_warned_) {
+      session_warned_ = true;
+      std::cerr << "[session] warning: cannot commit turn " << turn << ": " << e.what() << "\n";
+    }
+  }
+}
+
+void CoreEngine::session_abort(int64_t turn, const std::string& code, bool compacted) {
+  if (!session_) return;
+  try {
+    if (compacted)
+      session_->append_abort(turn, code, &history_);
+    else
+      session_->append_abort(turn, code, nullptr);
+  } catch (const std::exception& e) {
+    if (!session_warned_) {
+      session_warned_ = true;
+      std::cerr << "[session] warning: cannot abort turn " << turn << ": " << e.what() << "\n";
+    }
+  }
+}
+
 json CoreEngine::hello_payload() const {
-  return json{{"protocol_version", proto::PROTOCOL_VERSION},
-              {"core_version", proto::CORE_VERSION},
-              {"pid", static_cast<int64_t>(::getpid())}};
+  json p = {{"protocol_version", proto::PROTOCOL_VERSION},
+            {"core_version", proto::CORE_VERSION},
+            {"pid", static_cast<int64_t>(::getpid())}};
+  if (session_) p["session"] = session_->info(false);
+  return p;
 }
 
 void CoreEngine::greet(const FrameSink& sink) {
   const std::string frame = proto::frame_event(++seq_, "hello", hello_payload());
   log('<', frame);
   sink(frame);
+  if (session_) {
+    try {
+      session_->append_session_open(false);
+    } catch (const std::exception& e) {
+      if (!session_warned_) {
+        session_warned_ = true;
+        std::cerr << "[session] warning: cannot record session.open: " << e.what() << "\n";
+      }
+    }
+  }
 }
 
 void CoreEngine::log(char dir, const std::string& frame) {
-  if (!log_.is_open()) return;
   std::string f = frame;
   while (!f.empty() && (f.back() == '\n' || f.back() == '\r')) f.pop_back();  // 一帧 = 一行
-  log_ << (dir == '>' ? "--> " : "<-- ") << f << '\n';
-  log_.flush();  // 实时落盘：崩溃时也能看到最后一帧
+
+  if (log_.is_open()) {
+    log_ << (dir == '>' ? "--> " : "<-- ") << f << '\n';
+    log_.flush();  // 实时落盘：崩溃时也能看到最后一帧
+  }
+
+  // S7：会话日志顺手记线上帧（审计 + seq 水位）。恢复不读这些帧。
+  if (session_ && !f.empty()) {
+    const json parsed = proto::parse_frame(f);
+    if (!parsed.is_null()) {
+      try {
+        session_->append_frame(parsed);
+      } catch (const std::exception& e) {
+        if (!session_warned_) {
+          session_warned_ = true;
+          std::cerr << "[session] warning: cannot append to session log: " << e.what() << "\n";
+        }
+      }
+    }
+  }
 }
 
 void CoreEngine::send(const std::string& frame) {
@@ -243,8 +357,69 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
       shutdown_requested_ = true;
       return;
     }
-    emit(proto::frame_response_ok(id, json{{"protocol_version", proto::PROTOCOL_VERSION},
-                                           {"core_version", proto::CORE_VERSION}}));
+    json result = {{"protocol_version", proto::PROTOCOL_VERSION},
+                   {"core_version", proto::CORE_VERSION}};
+    if (session_) result["session"] = session_->info(false);
+    emit(proto::frame_response_ok(id, result));
+    return;
+  }
+
+  if (method == "session.load") {
+    const bool resume = params.contains("resume") && params["resume"].is_boolean()
+                            ? params["resume"].get<bool>() : false;
+    const std::string sid = (params.contains("id") && params["id"].is_string())
+                                ? params["id"].get<std::string>() : std::string();
+    const bool create = params.contains("create") && params["create"].is_boolean()
+                            ? params["create"].get<bool>() : false;
+    if (resume && !sid.empty()) {
+      send_err(id, "INVALID_PARAMS", "session.load takes either 'id' or 'resume', not both");
+      return;
+    }
+    if (!resume && sid.empty()) {
+      send_err(id, "INVALID_PARAMS", "session.load needs an 'id' (or resume:true)");
+      return;
+    }
+    if (session_ && resume) {
+      // 已经挂着一个会话：resume 视为"保持当前"（真正的切换用 id）。
+      // 不能在这里重新 open_latest：同一进程对同一个文件再 flock 会得到 SESSION_BUSY。
+      json info = session_->info(true);
+      info["created"] = false;
+      emit(proto::frame_response_ok(id, info));
+      return;
+    }
+    if (session_ && !resume && sid == session_->id()) {
+      json info = session_->info(true);
+      info["created"] = false;
+      emit(proto::frame_response_ok(id, info));
+      return;
+    }
+
+    const std::string dir = opts_.session_dir.empty() ? default_session_dir() : opts_.session_dir;
+    const SessionHeaderConfig cfg{opts_.model, opts_.workdir, opts_.tools};
+    try {
+      auto store = std::make_unique<SessionStore>(dir);
+      // 新建会话不能把当前会话的 history_ 克隆过去；只用本次 flags 的 system 起步。
+      std::vector<Message> initial;
+      if (!configured_system_.empty()) initial.push_back(Message{"system", configured_system_});
+      SessionOpenResult res = resume ? store->open_latest(initial, cfg)
+                                     : store->open(sid, create, initial, cfg);
+      history_ = std::move(res.messages);
+      if (!configured_system_.empty() &&
+          (history_.empty() || history_.front().role != "system")) {
+        std::cerr << "[session] warning: loaded session has no system message; the current "
+                     "--system/--tools prompt is not applied\n";
+      }
+      seq_ = std::max(seq_, res.last_seq);
+      turn_ = std::max(turn_, res.turns);
+      session_ = std::move(store);
+      json info = session_->info(true);
+      info["created"] = res.created;
+      emit(proto::frame_response_ok(id, info));
+    } catch (const SessionError& e) {
+      send_err(id, e.code, e.what());
+    } catch (const std::exception& e) {
+      send_err(id, "SESSION_IO_ERROR", e.what());
+    }
     return;
   }
 
@@ -267,6 +442,7 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
     const int64_t turn = ++turn_;
     const std::string turn_id = "t" + std::to_string(turn);
     const std::string reply = demo_reply(text, turn);
+    session_turn_begin(turn);
 
     // 一个请求 → 一串事件 → 最后才响应（protocol.md §9 S2）
     // S5 刻意**不**给假模型合批：test_s2 用"一个 delta 恰好一个码点"钉着它，
@@ -276,6 +452,8 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
       if (opts_.demo_delay_ms > 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(opts_.demo_delay_ms));
     }
+    if (session_)
+      session_->append_commit(turn, "stop", json::object(), 1, 0, {}, nullptr);
     emit(proto::frame_response_ok(id, json{{"turn_id", turn_id}, {"text", reply}, {"stop_reason", "stop"}}));
     return;
   }
@@ -297,7 +475,9 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
     // 注意：**取消不走这条**——取消是用户喊停，已经发生的部分要留下（见下面的注释）。
     // S6 提醒：压缩会让 history_ **变短**，所以这个水位线不是 const——压完要跟着往下挪。
     size_t history_mark = history_.size();
+    bool compacted = false;
     history_.push_back(Message{"user", text});
+    session_turn_begin(turn);
 
     // S5：把"这一轮可以被取消"这件事告诉 turn.cancel 的处理者；~TurnFlag 负责复位。
     struct TurnFlag {
@@ -324,6 +504,7 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
         if (step > opts_.max_steps) {
           // 循环硬上限：模型一直要调工具就是不肯收尾，这时候必须有人喊停。
           history_.resize(history_mark);
+          session_abort(turn, "MAX_STEPS", compacted);
           send_err(id, "MAX_STEPS", "agent loop stopped after " + std::to_string(opts_.max_steps) +
                                         " model calls without a final answer (raise --max-steps if this is expected)");
           return;
@@ -341,6 +522,8 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
         // 进模型调用之前先看一眼：上一个 step 跑工具的时候，用户可能已经按过 Ctrl-C
         pump_input();
         if (cancel_requested_) {
+          session_commit(turn, "cancelled", json::object(), step - 1,
+                         static_cast<int64_t>(tool_calls_total), history_mark, compacted);
           emit(proto::frame_response_ok(id, json{{"turn_id", turn_id},
                                                  {"text", ""},
                                                  {"stop_reason", "cancelled"},
@@ -354,6 +537,7 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
         // 放在这里（而不是构造时）的理由：每多一个 step 历史都会变长，压不压要看"现在"有多少。
         const CompactReport rep = ctx_.compact(history_);
         if (rep.did) {
+          compacted = true;
           // 历史可能被压得比回滚水位还短；不 clamp 的话 resize() 会把它**撑大**（补空消息）。
           if (history_mark > history_.size()) history_mark = history_.size();
           emit(proto::frame_event(++seq_, "context.compacted",
@@ -399,6 +583,8 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
           // 否则下一轮就是"半句话 + 两个连续的 user"，比留着更糟。
           // 代价写在 docs/stage-s5.md：取消时不做整轮回滚（那是失败语义）。
           if (!r.text.empty()) history_.push_back(Message{"assistant", r.text});
+          session_commit(turn, "cancelled", r.usage, step, static_cast<int64_t>(tool_calls_total),
+                         history_mark, compacted);
           emit(proto::frame_response_ok(id, json{{"turn_id", turn_id},
                                                  {"text", r.text},
                                                  {"stop_reason", "cancelled"},
@@ -410,6 +596,8 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
 
         if (r.tool_calls.empty()) {  // 模型给出最终答复：本 turn 结束
           history_.push_back(Message{"assistant", r.text});
+          session_commit(turn, r.finish_reason, r.usage, step,
+                         static_cast<int64_t>(tool_calls_total), history_mark, compacted);
           emit(proto::frame_response_ok(id, json{{"turn_id", turn_id},
                                                  {"text", r.text},
                                                  {"stop_reason", r.finish_reason},
@@ -482,6 +670,7 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
       }
     } catch (const std::exception& e) {
       history_.resize(history_mark);  // 失败的一轮不进历史：否则下一次请求会带着半截对话
+      session_abort(turn, "PROVIDER_ERROR", compacted);
       send_err(id, "PROVIDER_ERROR", e.what());
     }
     return;

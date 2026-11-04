@@ -27,7 +27,8 @@ add_library(agent_core_lib STATIC
   src/core/openai_compat.cpp
   src/core/sse.cpp           # S3b：SSE 增量解析（本身不认识 HTTP，见下）
   src/core/tools.cpp         # S4：工具层（read_file / write_file / run_shell）
-  src/core/context.cpp)      # S6：预算与压缩（只认 vector<Message>，不认识协议/HTTP）
+  src/core/context.cpp        # S6：预算与压缩（只认 vector<Message>，不认识协议/HTTP）
+  src/core/session.cpp)       # S7：会话落盘/恢复（只认 Message + json）
 target_link_libraries(agent_core_lib PUBLIC agent_common httplib
                                       OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
@@ -36,6 +37,11 @@ target_link_libraries(agent-core PRIVATE agent_core_lib)
 
 add_executable(agent-cli src/cli/main.cpp)
 target_link_libraries(agent-cli PRIVATE agent_core_lib)
+
+# S7：第二个前端（headless）。**只链接 agent_common**——不碰 core 静态库，
+# 从链接层面证明它只靠协议活（源码层面的 grep 由 tests/test_s7.py 守着）。
+add_executable(agent-run src/run/main.cpp)
+target_link_libraries(agent-run PRIVATE agent_common)
 
 # S3b：SSE 解析器的纯单元测试。它只编译 sse.cpp —— 不链接 httplib / OpenSSL，
 # 等于顺手用构建系统证明"sse 不依赖网络库"（铁律的机器化检查）。
@@ -66,3 +72,6 @@ add_test(NAME s5_cancel_batching
 add_test(NAME s6_context_unit COMMAND context_test)
 add_test(NAME s6_context
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s6.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli>)
+# S7：会话持久化 / resume / headless 前端。
+add_test(NAME s7_session
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s7.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli> $<TARGET_FILE:agent-run>)

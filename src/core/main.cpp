@@ -28,7 +28,10 @@ void usage() {
                "  --system TEXT       系统提示词；不给时：有 --tools 就用内置 agent 提示词，没工具就不加\n"
                "  --delta-batch-ms N  增量合批窗口（默认 30，0 = 一增量一帧；只影响帧密度，不影响拼接）\n"
                "  --max-context-tokens N  上下文预算（估算 token，默认 32000；0 = 不压缩）\n"
-               "  --keep-recent-turns N   压缩时最近几轮原样保留（默认 3）\n";
+               "  --keep-recent-turns N   压缩时最近几轮原样保留（默认 3）\n"
+               "  --session ID        会话落盘到 ~/.agent/sessions/<id>.jsonl（不存在就新建）\n"
+               "  --resume[=ID]       恢复最近的会话（或指定 ID，必须已存在）\n"
+               "  --session-dir DIR   会话目录（默认 ~/.agent/sessions；测试用）\n";
 }
 
 // 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
@@ -77,6 +80,11 @@ int main(int argc, char** argv) {
       opts.max_context_tokens = static_cast<size_t>(std::max(0, std::atoi(v.c_str())));
     else if (opt_value(argc, argv, i, "--keep-recent-turns", v))
       opts.keep_recent_turns = std::max(1, std::atoi(v.c_str()));
+    else if (opt_value(argc, argv, i, "--session", v)) opts.session_id = v;
+    else if (opt_value(argc, argv, i, "--session-dir", v)) opts.session_dir = v;
+    else if (a == "--resume") opts.resume_latest = true;
+    else if (a.rfind("--resume=", 0) == 0) opts.resume_id = a.substr(9);
+    else if (opt_value(argc, argv, i, "--resume", v)) opts.resume_id = v;
     else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
   }
 
@@ -100,7 +108,20 @@ int main(int argc, char** argv) {
               << opts.base_url << " (e.g. gpt-4o-mini, qwen-max...)\n";
   }
 
-  core::CoreEngine engine(std::move(opts));
-  // S5：run() 不再收 istream/ostream —— 取消要在读 stdin 时做 poll，只有真实 fd 才能 poll。
-  return engine.run();
+  if (!opts.session_id.empty() && (opts.resume_latest || !opts.resume_id.empty())) {
+    std::cerr << "agent-core: --session and --resume are mutually exclusive\n";
+    return 1;
+  }
+
+  try {
+    core::CoreEngine engine(std::move(opts));
+    // S5：run() 不再收 istream/ostream —— 取消要在读 stdin 时做 poll，只有真实 fd 才能 poll。
+    return engine.run();
+  } catch (const core::SessionError& e) {
+    std::cerr << "agent-core: " << e.code << ": " << e.what() << "\n";
+    return 2;
+  } catch (const std::exception& e) {
+    std::cerr << "agent-core: " << e.what() << "\n";
+    return 2;
+  }
 }
