@@ -15,6 +15,7 @@
 //   * 压缩只动 history_，协议只多一个 context.compacted 事件——前端仍然看不见"上下文"。
 #include "common/protocol.hpp"
 #include "core/context.hpp"
+#include "core/policy.hpp"
 #include "core/provider.hpp"
 #include "core/session.hpp"
 #include "core/tools.hpp"
@@ -78,6 +79,10 @@ struct Options {
   std::string resume_id;       // --resume=<id>：必须已存在
   bool resume_latest = false;  // --resume：取最近使用的会话
   std::string session_dir;     // --session-dir；空 = ~/.agent/sessions
+
+  // —— S8：权限与审批 ——
+  ApprovalMode approval_mode = ApprovalMode::Ask;  // 默认：危险操作问，安全操作放
+  int approval_timeout_ms = 120000;                // ask 等待前端回答的上限
 };
 
 class CoreEngine {
@@ -108,6 +113,8 @@ class CoreEngine {
   // —— S7：会话接线 ——
   void attach_session(const std::vector<Message>& initial_messages);
   void session_turn_begin(int64_t turn);
+  void resolve_approval(const json& req);
+  bool request_approval(const json& payload, std::string& reason);
   void session_commit(int64_t turn, const std::string& stop_reason, const json& usage,
                       int64_t steps, int64_t tool_calls, size_t history_mark, bool compacted);
   void session_abort(int64_t turn, const std::string& code, bool compacted);
@@ -123,10 +130,16 @@ class CoreEngine {
   std::unique_ptr<Provider> provider_;  // 空 = 没有真模型（chat 会回 NO_PROVIDER）
   ToolRegistry tools_;                  // 空 = 模型没有手脚（S4 之前的行为）
   ContextManager ctx_;                  // S6：预算与压缩（只认 vector<Message>，不认识协议）
+  Policy policy_;                       // S8：allow / ask / deny（只看工具名 + 参数）
   std::vector<Message> history_;        // 消息历史（真相在 core）；S6 压缩、S7 落盘都从它来
   std::unique_ptr<SessionStore> session_;  // S7：空 = 本次会话不落盘
   std::string configured_system_;          // 启动时按 flags 组装的 system（恢复时只用于比对）
   bool session_warned_ = false;            // 落盘失败只吵一次
+  int64_t approval_counter_ = 0;           // approval_id：a1, a2, ...
+  std::string pending_approval_id_;        // 非空 = 正在等前端回答
+  bool approval_done_ = false;             // 本次等待是否已经有答案
+  bool approval_allowed_ = false;
+  std::string approval_answer_reason_;
   int64_t seq_ = 0;   // 事件序列号：从 1 开始、严格递增、无空洞（protocol.md §2.3）
   int64_t turn_ = 0;  // 第几轮对话（S2 只有 turn 这个概念，S3 会长大）
   bool shutdown_requested_ = false;

@@ -4,7 +4,7 @@
 `agent-core` 是大脑（模型调用 / 历史 / 工具 / 预算 / 审批），`agent-cli` 与 `agent-run` 是两张脸（只消费事件），
 它们用 **NDJSON over stdio** 说话。
 
-> **现在的状态：S7 完成**（tag `s7`），10 套测试全绿。
+> **现在的状态：S8 完成**（tag `s8`），11 套测试全绿。
 > 下一步做什么、卡在哪、怎么验证 → **[docs/HANDOFF.md](docs/HANDOFF.md)** ← 新会话先读这个。
 
 ---
@@ -13,7 +13,7 @@
 
 ```bash
 cmake -B build -S . && cmake --build build -j8
-cd build && ctest          # 10 套：协议 / 事件流 / 真模型 / SSE / 工具 / 取消 / 压缩 / 会话
+cd build && ctest          # 11 套：协议 / 事件流 / 真模型 / SSE / 工具 / 取消 / 压缩 / 会话 / 审批
 
 # 假模型（不联网、不要 key）
 printf '你好\n' | ./agent-cli --demo
@@ -36,7 +36,7 @@ printf '读一下 a.txt，统计行数\n' | ./agent-cli --tools all --workdir /t
 | **现在进行到哪、下一步做什么、有哪些坑** | **[docs/HANDOFF.md](docs/HANDOFF.md)** |
 | 线上到底发什么帧（协议契约 + 不变量） | [docs/protocol.md](docs/protocol.md) |
 | 谁该拥有什么职责、铁律、逐阶段代码地图 | [docs/responsibilities.md](docs/responsibilities.md) |
-| 某个阶段**为什么**这么设计、替代方案、踩的坑 | `docs/stage-s2.md` … `docs/stage-s7.md` |
+| 某个阶段**为什么**这么设计、替代方案、踩的坑 | `docs/stage-s2.md` … `docs/stage-s8.md` |
 | 阶段计划与每阶段 DoD（S0–S11，S3 拆成 a/b） | [docs/roadmap.md](docs/roadmap.md) |
 | 为什么选这套 C++ 技术栈 | [docs/tech-stack.md](docs/tech-stack.md) |
 | 业界怎么做（Codex / Gemini / Claude Code 源码级调研） | [docs/architecture-brief.md](docs/architecture-brief.md) |
@@ -60,8 +60,8 @@ printf '读一下 a.txt，统计行数\n' | ./agent-cli --tools all --workdir /t
 | S5 | 打断与并发（取消 + 合批） | ✅ | 24 |
 | S6 | 上下文预算与压缩 | ✅ | 28 + 31 |
 | S7 | 会话持久化 / resume / headless | ✅ | 107 |
-| **S8** | **权限、审批与沙箱** | ⬜ **下一步** | — |
-| S9 | TUI —— **M4** | ⬜ | — |
+| S8 | 权限、审批与沙箱 | ✅ | 56 |
+| **S9** | **TUI —— M4** | ⬜ **下一步** | — |
 | S10 | MCP 工具 | ⬜ | — |
 | S11 | 子智能体 / skills —— **M5** | ⬜ | — |
 
@@ -74,10 +74,11 @@ agent-cli ──request / turn.cancel──► agent-core
 agent-run ──request / shutdown─────► agent-core   （S7：第二个前端，只靠协议）
    ▲                                    │
    └── event / response ◄───────────────┘
+         approval.requested / approval.respond（S8：审批往返）
 ```
 
 - **真相只在 core**：历史、工具、预算、审批判定都在这里。前端不持有任何状态。
-- **前端只消费事件**：`assistant.delta` / `tool.call` / `tool.result` / `context.compacted`。
+- **前端只消费事件**：`assistant.delta` / `tool.call` / `tool.result` / `context.compacted` / `approval.requested`。
 - **协议先于实现**：S0 就把帧形状定死；后面每阶段只**追加**事件和方法，不改旧的。
 
 ---
@@ -93,6 +94,9 @@ agent-run ──request / shutdown─────► agent-core   （S7：第二
 已登记的例外：`--embedded` 让 `agent-cli` 在**链接层面**拿到 `agent_core_lib`（含 httplib/OpenSSL），
 为的是"同进程直连"的调试能力。源码级铁律不变，见 `docs/stage-s2.md` 决策 2。
 
+5. **权限判定只在 core**：`Policy` 决定 allow/ask/deny；前端只能回 allow/deny，
+   不能绕过策略直接执行工具。
+
 ---
 
 ## 目录
@@ -104,6 +108,7 @@ src/core/                 core_engine（协议外壳）/ provider / openai_compa
 src/cli/main.cpp          agent-cli：只消费事件的前端
 src/run/main.cpp          agent-run：一次性 headless 前端（只链 agent_common）
 src/core/session.cpp      S7 会话日志 / resume / flock
+src/core/policy.cpp       S8 allow/ask/deny（workdir 边界 + 危险命令黑名单）
 tests/                    ctest 驱动：Python 端到端 + 两个 C++ 单元测试 + fixtures
 docs/                     见上面的文档地图
 ```

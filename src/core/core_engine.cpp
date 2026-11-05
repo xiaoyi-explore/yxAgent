@@ -72,7 +72,8 @@ std::string demo_reply(const std::string& text, int64_t turn) {
 CoreEngine::CoreEngine(Options opts)
     : opts_(std::move(opts)),
       // S6：阈值 0.5 是 Gemini CLI 的实测值；等到快满了再压，你会先被"一次多轮工具调用"顶爆。
-      ctx_(ContextConfig{opts_.max_context_tokens, 0.5, opts_.keep_recent_turns, 2048}) {
+      ctx_(ContextConfig{opts_.max_context_tokens, 0.5, opts_.keep_recent_turns, 2048}),
+      policy_(opts_.workdir, opts_.approval_mode) {
   if (!opts_.log_raw_path.empty()) {
     log_.open(opts_.log_raw_path, std::ios::out | std::ios::trunc);
     if (!log_) std::cerr << "[core] warning: cannot open log-raw file: " << opts_.log_raw_path << "\n";
@@ -191,6 +192,88 @@ void CoreEngine::session_abort(int64_t turn, const std::string& code, bool compa
       std::cerr << "[session] warning: cannot abort turn " << turn << ": " << e.what() << "\n";
     }
   }
+}
+
+void CoreEngine::resolve_approval(const json& req) {
+  const json& id = req["id"];
+  const json params = (req.contains("params") && req["params"].is_object()) ? req["params"] : json::object();
+  const std::string approval_id = (params.contains("approval_id") && params["approval_id"].is_string())
+                                      ? params["approval_id"].get<std::string>() : std::string();
+
+  if (pending_approval_id_.empty() || approval_done_ || approval_id != pending_approval_id_) {
+    send(proto::frame_response_err(id, "NO_PENDING_APPROVAL",
+                                   "no approval is pending (or it was already answered); "
+                                   "wait for approval.requested first"));
+    return;
+  }
+
+  const std::string decision = (params.contains("decision") && params["decision"].is_string())
+                                   ? params["decision"].get<std::string>() : std::string();
+  if (decision != "allow" && decision != "deny") {
+    send(proto::frame_response_err(id, "INVALID_PARAMS",
+                                   "approval.respond decision must be 'allow' or 'deny'"));
+    return;
+  }
+
+  approval_done_ = true;
+  approval_allowed_ = (decision == "allow");
+  approval_answer_reason_ = (params.contains("reason") && params["reason"].is_string())
+                                ? params["reason"].get<std::string>() : std::string();
+  send(proto::frame_response_ok(id, json{{"approval_id", approval_id}, {"decision", decision}}));
+}
+
+bool CoreEngine::request_approval(const json& payload, std::string& reason) {
+  const std::string approval_id = (payload.contains("approval_id") && payload["approval_id"].is_string())
+                                      ? payload["approval_id"].get<std::string>() : std::string();
+  if (approval_id.empty()) {
+    reason = "approval payload has no approval_id";
+    return false;
+  }
+  if (cancel_requested_) {
+    reason = "cancelled before approval";
+    return false;
+  }
+
+  pending_approval_id_ = approval_id;
+  approval_done_ = false;
+  approval_allowed_ = false;
+  approval_answer_reason_.clear();
+  send(proto::frame_event(++seq_, "approval.requested", payload));
+
+  // --embedded 没有"等回答"的窗口：同步回调里再读 stdin 会和 cli 抢输入。
+  // 明确拒绝，而不是假装批准；理由会作为工具错误回灌给模型。
+  if (!stdio_mode_) {
+    pending_approval_id_.clear();
+    reason = "--embedded does not support interactive approval";
+    return false;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(std::max(0, opts_.approval_timeout_ms));
+  while (!approval_done_) {
+    pump_input();
+    if (approval_done_) break;
+    if (cancel_requested_) {
+      reason = "cancelled during approval";
+      break;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      reason = "approval timed out after " + std::to_string(opts_.approval_timeout_ms) + " ms";
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  const bool allowed = approval_done_ && approval_allowed_;
+  if (!allowed && reason.empty()) {
+    if (approval_done_)
+      reason = approval_answer_reason_.empty() ? "user denied" : approval_answer_reason_;
+    else
+      reason = "no approval decision";
+  }
+  pending_approval_id_.clear();
+  approval_done_ = false;
+  return allowed;
 }
 
 json CoreEngine::hello_payload() const {
@@ -316,6 +399,12 @@ void CoreEngine::dispatch_line(const std::string& line) {
   }
 
   const std::string method = v["method"].get<std::string>();
+  if (method == "approval.respond") {
+    // 审批回答必须立刻处理：它和 turn.cancel 一样，是"本轮正在等的东西"。
+    log('>', v.dump());
+    resolve_approval(v);
+    return;
+  }
   if (method == "turn.cancel") {
     // 取消是**唯一**能在本轮进行中被处理的请求：它的全部意义就是"打断正在跑的东西"。
     // 其他请求一律排队（协议保证每个请求都有响应，只是晚一点）。
@@ -638,9 +727,38 @@ void CoreEngine::handle_request(const json& req, const FrameSink& sink) {
           emit(proto::frame_event(++seq_, "tool.call", call_payload));
 
           const auto started = std::chrono::steady_clock::now();
-          const ToolResult res = arg_error.empty()
-                                     ? tools_.execute(call.name, args)
-                                     : ToolResult::failure(arg_error + ": " + truncate(call.arguments, 200));
+
+          // S8：先过策略闸门；ask 时发 approval.requested，等前端回 approval.respond。
+          bool allowed = true;
+          std::string denial;
+          if (arg_error.empty()) {
+            const PolicyResult policy = policy_.check(call.name, args);
+            if (policy.permission == Permission::Deny) {
+              allowed = false;
+              denial = policy.reason;
+            } else if (policy.permission == Permission::Ask) {
+              const std::string approval_id = "a" + std::to_string(++approval_counter_);
+              json ask = {{"approval_id", approval_id},
+                          {"turn_id", turn_id},
+                          {"step", step},
+                          {"call_id", call.id},
+                          {"name", call.name},
+                          {"arguments", args},
+                          {"reason", policy.reason}};
+              std::string why;
+              allowed = request_approval(ask, why);
+              if (!allowed) denial = "approval denied: " + why;
+            }
+          }
+
+          ToolResult res;
+          if (!allowed) {
+            res = ToolResult::failure(denial);
+          } else if (!arg_error.empty()) {
+            res = ToolResult::failure(arg_error + ": " + truncate(call.arguments, 200));
+          } else {
+            res = tools_.execute(call.name, args);
+          }
           const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - started).count();
 

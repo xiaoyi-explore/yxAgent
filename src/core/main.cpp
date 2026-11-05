@@ -31,7 +31,10 @@ void usage() {
                "  --keep-recent-turns N   压缩时最近几轮原样保留（默认 3）\n"
                "  --session ID        会话落盘到 ~/.agent/sessions/<id>.jsonl（不存在就新建）\n"
                "  --resume[=ID]       恢复最近的会话（或指定 ID，必须已存在）\n"
-               "  --session-dir DIR   会话目录（默认 ~/.agent/sessions；测试用）\n";
+               "  --session-dir DIR   会话目录（默认 ~/.agent/sessions；测试用）\n"
+               "  --approval MODE     权限策略：ask（默认）/ never / allow\n"
+               "  --approval-timeout-ms N  ask 等前端回答的上限（默认 120000；0 = 立刻超时）\n";
+
 }
 
 // 取开关的值：支持 --k=v 与 --k v 两种写法；命中返回 true
@@ -85,7 +88,14 @@ int main(int argc, char** argv) {
     else if (a == "--resume") opts.resume_latest = true;
     else if (a.rfind("--resume=", 0) == 0) opts.resume_id = a.substr(9);
     else if (opt_value(argc, argv, i, "--resume", v)) opts.resume_id = v;
-    else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
+    else if (opt_value(argc, argv, i, "--approval", v)) {
+      if (!core::Policy::parse_mode(v, opts.approval_mode)) {
+        std::cerr << "agent-core: --approval must be ask, never or allow (got '" << v << "')\n";
+        return 1;
+      }
+    } else if (opt_value(argc, argv, i, "--approval-timeout-ms", v)) {
+      opts.approval_timeout_ms = std::max(0, std::atoi(v.c_str()));
+    } else { std::cerr << "agent-core: unknown argument: " << a << "\n"; usage(); return 1; }
   }
 
   // key 优先 --api-key，其次环境变量。环境变量更安全：argv 对同机所有用户可见。

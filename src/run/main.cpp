@@ -35,6 +35,8 @@ struct RunArgs {
   std::string resume_id;
   bool resume_latest = false;
   std::string session_dir;
+  std::string approval = "never";  // headless 默认：危险操作直接拒绝，不等人
+  int approval_timeout_ms = 120000;
   int max_steps = 8;
   int max_context_tokens = 32000;
   int keep_recent_turns = 3;
@@ -56,6 +58,8 @@ void usage() {
          "  --session ID        开/建会话（~/.agent/sessions/<id>.jsonl）\n"
          "  --resume[=ID]       恢复最近的会话，或指定已存在的 ID\n"
          "  --session-dir DIR   会话目录（默认 ~/.agent/sessions）\n"
+         "  --approval MODE     权限策略：never（默认）/ ask / allow\n"
+         "  --approval-timeout-ms N  ask 等回答的上限（默认 120000）\n"
          "  --max-steps N       一个 turn 里最多几次模型调用（默认 8）\n"
          "  --max-context-tokens N  上下文预算（默认 32000，0 = 不压缩）\n"
          "  --keep-recent-turns N   压缩时最近几轮原样保留（默认 3）\n"
@@ -155,6 +159,14 @@ class CoreProcess {
     }
   }
 
+  // headless 没有 stdin 可问：approval.requested 一律拒绝，并且立刻把回答发回去。
+  void respond_approval(const json& payload, const std::string& decision) {
+    const std::string aid = payload.value("approval_id", "");
+    const std::string rid = "a" + std::to_string(++next_id_);
+    write_frame(proto::frame_request(rid, "approval.respond",
+                                     json{{"approval_id", aid}, {"decision", decision}}));
+  }
+
   int shutdown() {
     const json bye = call("shutdown", json::object(), nullptr);
     (void)bye;
@@ -217,6 +229,8 @@ std::vector<std::string> core_args(const RunArgs& a) {
   if (!a.resume_id.empty()) args.push_back("--resume=" + a.resume_id);
   else if (a.resume_latest) args.push_back("--resume");
   if (!a.session_dir.empty()) args.push_back("--session-dir=" + a.session_dir);
+  args.push_back("--approval=" + a.approval);
+  args.push_back("--approval-timeout-ms=" + std::to_string(a.approval_timeout_ms));
   return args;
 }
 
@@ -236,10 +250,15 @@ int run(const RunArgs& a) {
               << s.value("id", "?") << " (turns=" << s.value("turns", 0) << ")\n";
   }
 
-  const json resp = core.call("chat", json{{"text", a.prompt}}, [](const json& ev) {
+  const json resp = core.call("chat", json{{"text", a.prompt}}, [&core](const json& ev) {
     const std::string name = ev.value("name", "");
     const json payload = ev.contains("payload") ? ev["payload"] : json::object();
-    if (name == "tool.call") {
+    if (name == "approval.requested") {
+      std::cerr << "[approval] " << payload.value("name", "?") << " "
+                << payload.value("arguments", json::object()).dump()
+                << " -> deny (headless; pass --approval=allow to opt in)\n";
+      core.respond_approval(payload, "deny");
+    } else if (name == "tool.call") {
       std::cerr << "[tool] " << payload.value("name", "?") << " "
                 << payload.value("arguments", json::object()).dump() << "\n";
     } else if (name == "tool.result") {
@@ -299,6 +318,9 @@ int main(int argc, char** argv) {
     else if (opt_value(argc, argv, i, "--system", v)) a.system_prompt = v;
     else if (opt_value(argc, argv, i, "--session", v)) a.session_id = v;
     else if (opt_value(argc, argv, i, "--session-dir", v)) a.session_dir = v;
+    else if (opt_value(argc, argv, i, "--approval", v)) a.approval = v;
+    else if (opt_value(argc, argv, i, "--approval-timeout-ms", v))
+      a.approval_timeout_ms = std::max(0, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--max-steps", v)) a.max_steps = std::max(1, std::atoi(v.c_str()));
     else if (opt_value(argc, argv, i, "--max-context-tokens", v))
       a.max_context_tokens = std::max(0, std::atoi(v.c_str()));
@@ -321,6 +343,11 @@ int main(int argc, char** argv) {
     a.core_path = default_core_path(argc > 0 ? argv[0] : nullptr);
   if (!a.session_id.empty() && (a.resume_latest || !a.resume_id.empty())) {
     std::cerr << "agent-run: --session and --resume are mutually exclusive\n";
+    return 1;
+  }
+  if (a.approval != "ask" && a.approval != "never" && a.approval != "allow" &&
+      a.approval != "deny" && a.approval != "auto") {
+    std::cerr << "agent-run: --approval must be ask, never or allow (got '" << a.approval << "')\n";
     return 1;
   }
   if (positional.empty()) {

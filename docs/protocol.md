@@ -94,6 +94,8 @@
 | `tool.call`（事件） | core→cli | event | S4 | 模型要求调用工具 |
 | `tool.result`（事件） | core→cli | event | S4 | 工具执行结果（`call_id` 配对） |
 | `context.compacted`（事件） | core→cli | event | S6 | 压缩通知（只报计数） |
+| `approval.requested`（事件） | core→cli | event | S8 | 策略 ask：请前端做 allow/deny |
+| `approval.respond`（方法） | cli→core | request/response | S8 | 回传审批决定（ack 是独立 response） |
 | `session.load`（方法） | cli→core | request/response | S7 | 打开/恢复会话；见 §9 S7 |
 | `session.*`（日志记录） | core→磁盘 | **非 wire** | S7 | header/checkpoint/commit/abort；只进会话文件 |
 
@@ -101,7 +103,7 @@
 
 | 消息 | 引入阶段 | 一句话 |
 |---|---|---|
-| `approval.requested` / `approval.respond` | S8 | 审批往返 |
+| （暂无） | S9 | TUI 消费已有事件，不新增协议消息 |
 
 ---
 
@@ -189,6 +191,7 @@ cli                                                core
 | `SESSION_BUSY` | S7：同一会话已被另一个进程打开（flock） | 回填 |
 | `SESSION_CORRUPT` | S7：会话文件结构坏 / seq 倒退 | 回填 |
 | `SESSION_UNSUPPORTED_VERSION` | S7：会话格式版本不认识 | 回填 |
+| `NO_PENDING_APPROVAL` | S8：审批回答没有对应的 pending / 已回答过 | 回填 |
 
 两条硬规则：
 
@@ -521,3 +524,93 @@ event               -> last_seq = max(...)，并要求 seq 严格递增
 | 6 | 会话日志只追加，已提交的记录永不重写 |
 
 设计记录（为什么不是纯帧、为什么一轮一行 commit、lean 版崩溃语义）见 `docs/stage-s7.md`。
+
+### S8 追加：`approval.requested` 与 `approval.respond`
+
+S8 只**追加**一个事件和一个方法；已有的帧形状与 turn 结算不变。
+审批判定在 **core**，前端只负责"问人"和回传 allow/deny。
+
+```text
+core                                                front-end
+ |  event tool.call {call_id,name,arguments}          |
+ |  event approval.requested {approval_id,reason} --> |
+ |                                                    |  显示 / 问 y-n
+ | <-- request approval.respond {approval_id,decision}|
+ |  response {ok:true, decision} -------------------> |  ack
+ |                                                    |
+ |  allow: 执行工具 -> event tool.result               |
+ |  deny : 不执行   -> event tool.result ok=false      |
+ |  ... 最后才是本轮 chat response（不变量 1）          |
+```
+
+#### 8.1 事件 `approval.requested`
+
+```json
+{"type":"event","seq":9,"name":"approval.requested","payload":{
+  "approval_id":"a1","turn_id":"t1","step":2,"call_id":"call_1",
+  "name":"run_shell","arguments":{"command":"rm -rf /tmp/x"},
+  "reason":"dangerous shell command: recursive/forced delete (rm -r/-f)"}}
+```
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `approval_id` | string | 本次审批 id，回答时必须回填 |
+| `turn_id` / `step` | string / int | 哪一轮、哪一步 |
+| `call_id` / `name` | string | 对应哪个 `tool.call` |
+| `arguments` | object | 模型给的参数（已解析；坏 JSON 不会走到审批） |
+| `reason` | string | 策略为什么 ask；给人看，必须可行动 |
+
+位置：在 `tool.call` 之后、对应 `tool.result` 之前。它占一个 `seq`。
+
+#### 8.2 方法 `approval.respond`
+
+请求：
+
+```json
+{"type":"request","id":"a1-ack","method":"approval.respond",
+ "params":{"approval_id":"a1","decision":"allow"}}
+```
+
+响应（ack；不是本轮 chat 的 response）：
+
+```json
+{"type":"response","id":"a1-ack","ok":true,
+ "result":{"approval_id":"a1","decision":"allow"}}
+```
+
+| 参数 | 规则 |
+|---|---|
+| `approval_id` | 必须等于当前 pending 的 id |
+| `decision` | `"allow"` 或 `"deny"`；其他值 -> `INVALID_PARAMS` |
+| `reason` | 可选；deny 时前端可附带原因（会出现在工具错误里） |
+
+错误：
+
+| code | 场景 |
+|---|---|
+| `NO_PENDING_APPROVAL` | 没有 pending，或 id 不匹配，或已经回答过 |
+| `INVALID_PARAMS` | decision 不是 allow/deny |
+
+#### 8.3 策略模式
+
+| `--approval` | `Ask` 规则变成 | 说明 |
+|---|---|---|
+| `ask`（默认） | 发 `approval.requested` 等前端 | 交互 |
+| `never` | `Deny`，不发事件 | 无人值守；错误直接回灌模型 |
+| `allow` | `Allow`，不问 | CI / 外部沙箱；危险开关 |
+
+`--approval-timeout-ms N`（默认 120000）：等待超时 = deny，
+工具错误为 `approval timed out after N ms`；本轮仍正常结算。
+
+#### 8.4 S8 的不变量
+
+| # | 不变量 |
+|---|---|
+| 1 | `approval.requested` 在 `tool.call` 之后、对应 `tool.result` 之前 |
+| 2 | 一个 `approval_id` 只接受一次有效回答；重复/错 id 是 `NO_PENDING_APPROVAL` |
+| 3 | deny / 超时 / 取消都不执行工具；但本轮 `chat` response 仍是最后一帧 |
+| 4 | deny 是**工具失败**（`tool.result.ok=false`），不是 turn 失败；模型可以自我纠正 |
+| 5 | 判定在 core；前端不能改策略、不能绕过策略直接执行 |
+| 6 | allow 只执行一次；审批等待期间的 `turn.cancel` 生效 |
+
+设计记录（为什么"解释器 + 代码"永不 allow-list、为什么不是 OS 沙箱、踩坑）见 `docs/stage-s8.md`。

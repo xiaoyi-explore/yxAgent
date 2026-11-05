@@ -32,6 +32,7 @@ volatile sig_atomic_t g_interrupt = 0;
 void on_sigint(int) { g_interrupt = 1; }
 
 using EventSink = std::function<void(const json& ev)>;
+using ApprovalHandler = std::function<std::string(const json& ev)>;
 
 // ============================ 与 core 的连接 ============================
 // 两种实现，对上层是同一件事：call() 发一个请求，途中事件实时回调，最后拿到响应。
@@ -41,7 +42,8 @@ class Session {
   virtual ~Session() = default;
   json hello;  // core 的身份（握手第一步收到的 payload）
   // 返回最终响应；null json 表示连接断了
-  virtual json call(const std::string& method, const json& params, const EventSink& on_event) = 0;
+  virtual json call(const std::string& method, const json& params, const EventSink& on_event,
+                    const ApprovalHandler& on_approval = nullptr) = 0;
   virtual int shutdown() = 0;  // 返回 core 的退出码
 };
 
@@ -70,6 +72,8 @@ class PipeSession : public Session {
     args.push_back("--delta-batch-ms=" + std::to_string(opts.delta_batch_ms));  // S5：合批窗口
     args.push_back("--max-context-tokens=" + std::to_string(opts.max_context_tokens));  // S6：预算
     args.push_back("--keep-recent-turns=" + std::to_string(opts.keep_recent_turns));    // S6：保留轮数
+    args.push_back("--approval=" + std::string(core::Policy::mode_name(opts.approval_mode)));  // S8
+    args.push_back("--approval-timeout-ms=" + std::to_string(opts.approval_timeout_ms));
     if (!opts.session_id.empty()) args.push_back("--session=" + opts.session_id);       // S7：开/建会话
     if (!opts.resume_id.empty()) args.push_back("--resume=" + opts.resume_id);          // S7：恢复指定会话
     else if (opts.resume_latest) args.push_back("--resume");                            // S7：恢复最近会话
@@ -116,7 +120,8 @@ class PipeSession : public Session {
     }
   }
 
-  json call(const std::string& method, const json& params, const EventSink& on_event) override {
+  json call(const std::string& method, const json& params, const EventSink& on_event,
+            const ApprovalHandler& on_approval = nullptr) override {
     const std::string rid = "r" + std::to_string(++next_id_);
     write_frame(in_, proto::frame_request(rid, method, params));
     // S5：只有 chat 可能很久，也只有它值得取消。
@@ -138,7 +143,19 @@ class PipeSession : public Session {
       const json v = proto::parse_frame(line);
       if (v.is_null()) continue;
       const std::string type = v.value("type", "");
-      if (type == "event") { on_event(v); continue; }
+      if (type == "event") {
+        if (v.value("name", "") == "approval.requested") {
+          const json payload = v.contains("payload") ? v["payload"] : json::object();
+          const std::string aid = payload.value("approval_id", "");
+          std::string decision = on_approval ? on_approval(v) : "deny";
+          if (decision != "allow" && decision != "deny") decision = "deny";
+          write_frame(in_, proto::frame_request("a" + std::to_string(++next_id_), "approval.respond",
+                                                json{{"approval_id", aid}, {"decision", decision}}));
+          continue;
+        }
+        on_event(v);
+        continue;
+      }
       if (type == "response" && v.contains("id") && v["id"].is_string() && v["id"].get<std::string>() == rid)
         return v;
       // 其他 response（id 不匹配）不属于本次调用，忽略
@@ -211,7 +228,9 @@ class EmbeddedSession : public Session {
     });
   }
 
-  json call(const std::string& method, const json& params, const EventSink& on_event) override {
+  json call(const std::string& method, const json& params, const EventSink& on_event,
+            const ApprovalHandler& on_approval = nullptr) override {
+    (void)on_approval;
     const std::string rid = "r" + std::to_string(++next_id_);
     const json req = json{{"type", "request"}, {"id", rid}, {"method", method}, {"params", params}};
     json resp;
@@ -264,6 +283,8 @@ void usage() {
                "  --session ID        透传给 core：开/建会话（~/.agent/sessions/<id>.jsonl）\n"
                "  --resume[=ID]       透传给 core：恢复最近的会话，或指定已存在的 ID\n"
                "  --session-dir DIR   透传给 core：会话目录（默认 ~/.agent/sessions）\n"
+               "  --approval MODE     透传给 core：ask（默认）/ never / allow\n"
+               "  --approval-timeout-ms N  ask 等回答的上限（默认 120000）\n"
                "  --log-raw FILE      透传给 core：抓双向报文\n"
                "  --demo-delay-ms N   透传给 core：假模型打字速度\n"
                "  API key 从环境变量 DEEPSEEK_API_KEY 读取（不会出现在命令行里）\n"
@@ -324,7 +345,14 @@ int main(int argc, char** argv) {
     else if (opt_value(argc, argv, i, "--session-dir", v)) cli.core_opts.session_dir = v;
     else if (a == "--resume") cli.core_opts.resume_latest = true;
     else if (a.rfind("--resume=", 0) == 0) cli.core_opts.resume_id = a.substr(9);
-    else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
+    else if (opt_value(argc, argv, i, "--approval", v)) {
+      if (!core::Policy::parse_mode(v, cli.core_opts.approval_mode)) {
+        std::cerr << "agent-cli: --approval must be ask, never or allow (got '" << v << "')\n";
+        return 1;
+      }
+    } else if (opt_value(argc, argv, i, "--approval-timeout-ms", v)) {
+      cli.core_opts.approval_timeout_ms = std::max(0, std::atoi(v.c_str()));
+    } else if (opt_value(argc, argv, i, "--log-raw", v)) cli.core_opts.log_raw_path = v;
     else if (opt_value(argc, argv, i, "--demo-delay-ms", v)) cli.core_opts.demo_delay_ms = std::max(0, std::atoi(v.c_str()));
     else if (!a.empty() && a[0] == '-') { std::cerr << "agent-cli: unknown option: " << a << "\n"; usage(); return 1; }
     else if (!core_path_set) { cli.core_path = a; core_path_set = true; }
@@ -380,6 +408,16 @@ int main(int argc, char** argv) {
     size_t deltas_in_last_step = 0;  // **最后一个** model step 的增量数：决定结算时要不要重播全文
     size_t cur_step = 0;
     bool line_open = false;       // 输出是否停在一行中间
+    const auto on_approval = [](const json& ev) -> std::string {
+      const json payload = ev.contains("payload") ? ev["payload"] : json::object();
+      std::cout << "\n[approval] " << payload.value("name", "?") << " "
+                << payload.value("arguments", json::object()).dump() << "\n"
+                << "           原因：" << payload.value("reason", "") << "\n"
+                << "           允许执行？[y/N] " << std::flush;
+      std::string answer;
+      if (!std::getline(std::cin, answer)) return "deny";
+      return (answer == "y" || answer == "Y" || answer == "yes" || answer == "allow") ? "allow" : "deny";
+    };
     const json resp = session->call(method, json{{"text", line}}, [&](const json& ev) {
       const std::string name = ev.value("name", "");
       const json payload = ev.contains("payload") ? ev["payload"] : json::object();
@@ -410,6 +448,11 @@ int main(int argc, char** argv) {
         return;
       }
 
+      if (name == "approval.requested") {  // S8：--embedded 走不到交互审批；明确说清楚
+        std::cerr << "[approval] --embedded 不支持交互审批，core 已拒绝\n";
+        return;
+      }
+
       if (name == "context.compacted") {  // S6：上下文被压过。只跟人说话，不污染 stdout
         std::cerr << "[context] 已压缩 ~" << payload.value("before_tokens", 0) << " -> ~"
                   << payload.value("after_tokens", 0) << " tokens（预算 " << payload.value("budget", 0)
@@ -426,7 +469,7 @@ int main(int argc, char** argv) {
         line_open = false;
         return;
       }
-    });
+    }, on_approval);
 
     if (resp.is_null()) {
       std::cerr << "agent-cli: core died unexpectedly\n";

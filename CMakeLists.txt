@@ -28,7 +28,8 @@ add_library(agent_core_lib STATIC
   src/core/sse.cpp           # S3b：SSE 增量解析（本身不认识 HTTP，见下）
   src/core/tools.cpp         # S4：工具层（read_file / write_file / run_shell）
   src/core/context.cpp        # S6：预算与压缩（只认 vector<Message>，不认识协议/HTTP）
-  src/core/session.cpp)       # S7：会话落盘/恢复（只认 Message + json）
+  src/core/session.cpp        # S7：会话落盘/恢复（只认 Message + json）
+  src/core/policy.cpp)        # S8：allow/ask/deny（只认工具名 + 参数）
 target_link_libraries(agent_core_lib PUBLIC agent_common httplib
                                       OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
@@ -75,3 +76,6 @@ add_test(NAME s6_context
 # S7：会话持久化 / resume / headless 前端。
 add_test(NAME s7_session
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s7.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli> $<TARGET_FILE:agent-run>)
+# S8：权限、审批与沙箱（Policy + approval.requested/respond）。
+add_test(NAME s8_policy
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s8.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli> $<TARGET_FILE:agent-run>)

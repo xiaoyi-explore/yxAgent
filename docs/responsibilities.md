@@ -16,7 +16,7 @@
 | 取消与节流 | 取消要穿透到 HTTP 层 | S5 | ✅ |
 | token 预算与压缩（`ContextManager`） | 只有 core 知道历史有多长；压缩是"认知"的活，不是 UI 的活 | S6 | ✅ |
 | 会话持久化（`SessionStore`） | 落盘格式是协议的一部分；恢复要重建 `history_` | S7 | ✅ |
-| 审批判定（allow/ask/deny） | 前端被绕过也不能失守 | S8 | 🔜 |
+| 审批判定（allow/ask/deny，`Policy`） | 前端被绕过也不能失守 | S8 | ✅ |
 
 ## agent-cli / agent-tui（脸，只消费事件）
 
@@ -26,7 +26,7 @@
 | 握手（等 event hello → request hello） | 时序的客户端一侧 | S1 | ✅ |
 | 收集用户输入 → request | —— | S1 | ✅ |
 | 把 `assistant.delta` 渲染成打字机效果（逐帧 flush） | core 从不发"渲染好的字符串" | S2 | ✅ |
-| 审批弹窗（只负责"问"和"回传答案"） | 决策在 core | S8 | 🔜 |
+| 审批交互（cli 行内 y/n，S9 换弹窗） | 决策在 core；前端只负责问和回传 | S8 | ✅ |
 | TUI 主循环与事件队列 | FTXUI 的线程模型要求 | S9 | 🔜 |
 
 ## agent-run（headless 前端，S7）
@@ -56,6 +56,8 @@
    靠测试守：`tests/test_s4.py::test_layering`。
 7. **`agent-run` 只链接 `agent_common`，不碰 `agent_core_lib` / httplib / OpenSSL。**
    它是第二个前端，不是 core 的第二个入口；靠 `tests/test_s7.py` 的 grep 守。
+8. **权限判定只在 core（`Policy`）**：前端只能回 allow/deny，不能绕过策略直接执行工具；
+   `--approval=allow` 是显式危险开关。
 
 ## S1 代码地图
 
@@ -96,6 +98,15 @@
 | `src/core/core_engine.cpp` | +30 | 每个 step 进模型前压一次；发 `context.compacted`；`history_mark` 跟着往下挪 |
 | `tests/context_test.cpp` | ~250 | 纯单元测试（只链 `context.cpp`）：配对、豁免、兜底、不许变大，共 28 项 |
 | `tests/test_s6.py` | ~200 | 端到端：事件、`/__last` 里的压缩后请求、关压缩、cli 不再编造 tokens |
+
+## S8 代码地图
+
+| 文件 | 行数级 | 内容 |
+|---|---|---|
+| `src/core/policy.hpp` / `.cpp` | ~60 / ~170 | `Policy`：workdir 规范化/边界、危险命令正则、ask/never/allow 闸门；不认识 HTTP/会话 |
+| `src/core/core_engine.cpp` | +130 | 工具执行前过 Policy；`request_approval()` 发事件、`pump_input()` 等回答、超时/取消；`resolve_approval()` |
+| `src/core/main.cpp` + `src/cli/main.cpp` + `src/run/main.cpp` | +20 / +45 / +45 | `--approval` / `--approval-timeout-ms`；cli y/n；agent-run 自动 deny |
+| `tests/test_s8.py` | ~600 | 11 组 56 项：workdir 边界、allow/deny、never/allow、超时、协议错误、cli、agent-run、路径穿越 |
 
 ## S7 代码地图
 

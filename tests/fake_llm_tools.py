@@ -67,6 +67,14 @@ def tool_plan(mode):
         return [("call_1", "run_shell", json.dumps({"command": "sleep 5", "timeout_ms": 300}))]
     if mode == "write":
         return [("call_1", "write_file", json.dumps({"path": "out.txt", "content": "written by tool" + NL}))]
+    if mode == "writeabs":
+        return [("call_1", "write_file", json.dumps({"path": "/tmp/s8-outside.txt", "content": "outside" + NL}))]
+    if mode == "writetraversal":
+        return [("call_1", "write_file", json.dumps({"path": "../s8-escape.txt", "content": "escape" + NL}))]
+    if mode == "rmrf":
+        return [("call_1", "run_shell", json.dumps({"command": "rm -rf /tmp/s8-target"}))]
+    if mode == "bashc":
+        return [("call_1", "run_shell", json.dumps({"command": "bash -c 'printf hi'"}))]
     if mode == "loop":
         return [("call_1", "read_file", json.dumps({"path": "a.txt"}))]
     return [("call_1", "read_file", json.dumps({"path": "a.txt"}))]
@@ -93,8 +101,12 @@ def final_answer(mode, messages):
         return "命令输出：" + content.replace(NL, " ").strip()[:60]
     if mode == "sleeptool":
         return "命令超时了：" + content.replace(NL, " ")[:60]
-    if mode == "write":
+    if mode in ("write", "writeabs", "writetraversal"):
         return "写好了：" + content.replace(NL, " ").strip()[:60]
+    if mode == "rmrf":
+        return "命令输出：" + content.replace(NL, " ").strip()[:80]
+    if mode == "bashc":
+        return "命令输出：" + content.replace(NL, " ").strip()[:60]
     if mode == "plain":
         return "纯文本回答，没有用任何工具"
     return "a.txt 共 %d 行" % count_lines(content)
