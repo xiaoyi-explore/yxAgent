@@ -91,7 +91,8 @@ UI 组件：
   - 工具：`read_file` 的 tool.call/结果在屏幕上可见；
   - 审批：越界写弹窗，`n` 后不写文件；
   - 分层：agent-tui 不 include core、不碰 httplib/openssl、只链 `agent_common + FTXUI`。
-- `ctest`：**13/13**（S1–S8 十一套 + TuiModel 单元 + TUI pty）。
+- `tests/tui_wrap_test.cpp`（6 项）：中英文/长 JSON/显式换行的宽度换行。
+- `ctest`：**14/14**（S1–S8 十一套 + TuiModel + textwrap + TUI pty）。
 
 ---
 
@@ -131,3 +132,18 @@ UI 组件：
 - [x] 审批弹窗 allow/deny 都能回传（pty 测 deny；allow 路径同 `approval.respond`）
 - [x] cli 保留；S1–S8 十一套仍全绿
 - [x] `protocol.md` §9 S9、本文件、刷新 `HANDOFF.md`、打 tag `s9`
+
+---
+
+## 9. S9.1 修复：横向溢出（换行）
+
+**现象**：长中文、长工具参数、长 JSON 在消息区被横向裁掉；FTXUI 的 `text()` 根本不换行，
+`paragraph()` 只按空格切词，中文没有空格 → 整段被当成一个超长 word。
+
+**修法**：
+
+- 新增 `src/tui/textwrap.hpp/.cpp`：用 `ftxui::Utf8ToGlyphs` + `ftxui::string_width`
+  逐 glyph 换行；中文/全角算 2 格，显式 `\n` 保留，`\t` 展开成 4 空格。
+- 消息区先 `wrap_text` 再取最后 `dimy-8` 行；状态栏、审批弹窗（工具/参数/原因）也走同一个 wrap。
+- 单测 `tests/tui_wrap_test.cpp`（6 项）：ASCII 切分、中文 2 格、显式换行、空文本、长 JSON、最小宽度。
+- `ctest` 从 13/13 变 **14/14**。

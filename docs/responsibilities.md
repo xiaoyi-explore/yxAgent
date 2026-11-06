@@ -117,8 +117,10 @@
 | `src/tui/main.cpp` | ~380 | FTXUI 视图、CatchEvent（y/n/Esc/Ctrl-C）、读取线程 + `screen.Post` |
 | `src/tui/core_client.hpp/.cpp` | ~40 / ~150 | `CoreProcess`：spawn core、send、阻塞 `read_frame`、shutdown/kill |
 | `src/tui/tui_model.hpp/.cpp` | ~60 / ~200 | `TuiModel`：delta/tool/compact/approval/response -> lines/status（不依赖 FTXUI） |
+| `src/tui/textwrap.hpp/.cpp` | ~20 / ~60 | 按 `string_width` 逐 glyph 换行（中文 2 格）；消息/状态/审批弹窗共用 |
 | `third_party/ftxui/` | vendored | FTXUI v5.0.0（MIT）；examples/doc 裁掉，CMake 注释两行 |
 | `tests/tui_model_test.cpp` | ~130 | 18 项纯状态测试 |
+| `tests/tui_wrap_test.cpp` | ~60 | 6 项换行测试（ASCII/中文/长 JSON/显式换行） |
 | `tests/test_s9.py` | ~220 | pty 端到端：demo / 工具 / 审批 deny / 分层 |
 
 ## S8 代码地图

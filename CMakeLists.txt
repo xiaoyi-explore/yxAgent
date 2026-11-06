@@ -55,7 +55,8 @@ target_link_libraries(agent-run PRIVATE agent_common)
 add_executable(agent-tui
   src/tui/main.cpp
   src/tui/core_client.cpp
-  src/tui/tui_model.cpp)
+  src/tui/tui_model.cpp
+  src/tui/textwrap.cpp)
 target_link_libraries(agent-tui PRIVATE agent_common component dom screen Threads::Threads)
 
 # S3b：SSE 解析器的纯单元测试。它只编译 sse.cpp —— 不链接 httplib / OpenSSL，
@@ -70,6 +71,10 @@ target_link_libraries(context_test PRIVATE agent_common)
 # S9：TuiModel 的纯单元测试（不链接 FTXUI，也不链接 core）。
 add_executable(tui_model_test tests/tui_model_test.cpp src/tui/tui_model.cpp)
 target_link_libraries(tui_model_test PRIVATE agent_common)
+
+# S9 fix：换行算法的纯单元测试（只依赖 FTXUI 的 string_width）。
+add_executable(tui_wrap_test tests/tui_wrap_test.cpp src/tui/textwrap.cpp)
+target_link_libraries(tui_wrap_test PRIVATE agent_common screen)
 
 enable_testing()
 add_test(NAME s1_handshake
@@ -99,5 +104,6 @@ add_test(NAME s8_policy
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s8.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-cli> $<TARGET_FILE:agent-run>)
 # S9：TUI（模型单元测试 + pty 端到端）。
 add_test(NAME s9_tui_model COMMAND tui_model_test)
+add_test(NAME s9_tui_wrap COMMAND tui_wrap_test)
 add_test(NAME s9_tui
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_s9.py $<TARGET_FILE:agent-core> $<TARGET_FILE:agent-tui>)

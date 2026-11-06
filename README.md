@@ -4,7 +4,7 @@
 `agent-core` 是大脑（模型调用 / 历史 / 工具 / 预算 / 审批），`agent-cli` / `agent-run` / `agent-tui` 是三张脸（只消费事件），
 它们用 **NDJSON over stdio** 说话。
 
-> **现在的状态：S9 完成**（tag `s9`），13 套测试全绿。
+> **现在的状态：S9 完成**（tag `s9`；`s9.1` 修 TUI 换行），14 套测试全绿。
 > 下一步做什么、卡在哪、怎么验证 → **[docs/HANDOFF.md](docs/HANDOFF.md)** ← 新会话先读这个。
 
 ---
@@ -13,7 +13,7 @@
 
 ```bash
 cmake -B build -S . && cmake --build build -j8
-cd build && ctest          # 13 套：协议 / 事件流 / 真模型 / SSE / 工具 / 取消 / 压缩 / 会话 / 审批 / TUI
+cd build && ctest          # 14 套：协议 / 事件流 / 真模型 / SSE / 工具 / 取消 / 压缩 / 会话 / 审批 / TUI
 
 # 假模型（不联网、不要 key）
 printf '你好\n' | ./agent-cli --demo
@@ -64,7 +64,7 @@ printf '读一下 a.txt，统计行数\n' | ./agent-cli --tools all --workdir /t
 | S6 | 上下文预算与压缩 | ✅ | 28 + 31 |
 | S7 | 会话持久化 / resume / headless | ✅ | 107 |
 | S8 | 权限、审批与沙箱 | ✅ | 56 |
-| S9 | TUI —— **M4** | ✅ | 18 + 20 |
+| S9 | TUI —— **M4** | ✅ | 18 + 20 + 6 |
 | **S10** | **MCP 工具** | ⬜ **下一步** | — |
 | S11 | 子智能体 / skills —— **M5** | ⬜ | — |
 

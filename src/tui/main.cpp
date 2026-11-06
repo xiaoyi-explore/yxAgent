@@ -7,6 +7,7 @@
 //   * 审批弹窗直接用 y/n 回答——判定仍在 core，这里只负责"问"。
 #include "common/protocol.hpp"
 #include "tui/core_client.hpp"
+#include "tui/textwrap.hpp"
 #include "tui/tui_model.hpp"
 
 #include <ftxui/component/component.hpp>
@@ -15,6 +16,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
+#include <ftxui/screen/string.hpp>
 #include <ftxui/screen/terminal.hpp>
 
 #include <algorithm>
@@ -31,6 +33,7 @@
 using namespace ftxui;
 using core::CoreProcess;
 using core::TuiModel;
+using core::wrap_text;
 using proto::json;
 
 namespace {
@@ -136,17 +139,21 @@ Element render_line(const core::TuiLine& line) {
   return e | dim;
 }
 
-Element approval_modal(const json& ap) {
-  return vbox({
-             text("审批请求") | bold,
-             separator(),
-             text("工具: " + ap.value("name", "?")),
-             paragraph("参数: " + ap.value("arguments", json::object()).dump()),
-             paragraph("原因: " + ap.value("reason", "")),
-             separator(),
-             text("[y] 允许    [n] 拒绝    [Esc] 拒绝") | dim,
-         }) |
-         border | bgcolor(Color::Black) | size(WIDTH, LESS_THAN, 76);
+Element approval_modal(const json& ap, int width) {
+  Elements lines;
+  lines.push_back(text("审批请求") | bold);
+  lines.push_back(separator());
+  for (const std::string& part : wrap_text("工具: " + ap.value("name", "?"), width))
+    lines.push_back(text(part));
+  for (const std::string& part :
+       wrap_text("参数: " + ap.value("arguments", json::object()).dump(), width))
+    lines.push_back(text(part));
+  for (const std::string& part : wrap_text("原因: " + ap.value("reason", ""), width))
+    lines.push_back(text(part));
+  lines.push_back(separator());
+  lines.push_back(text("[y] 允许    [n] 拒绝    [Esc] 拒绝") | dim);
+  return vbox(std::move(lines)) | border | bgcolor(Color::Black) |
+         size(WIDTH, LESS_THAN, width + 2);
 }
 
 }  // namespace
@@ -269,17 +276,32 @@ int main(int argc, char** argv) {
     Component input_comp = Input(input_option);
 
     auto renderer = Renderer(input_comp, [&] {
-        Elements body;
-        const auto& all = model.lines();
         const auto dims = Terminal::Size();
+        const int content_width = std::max(10, dims.dimx - 2);
+
+        // 先按显示宽度展开，再取最后 N 行；否则长中文/长 JSON 会横向溢出。
+        std::vector<core::TuiLine> visible;
+        for (const auto& line : model.lines()) {
+          for (const std::string& part : wrap_text(line.text, content_width))
+            visible.push_back(core::TuiLine{line.kind, part});
+        }
+        if (visible.empty()) {
+          for (const std::string& part : wrap_text("输入一句话开始；/quit 退出", content_width))
+            visible.push_back(core::TuiLine{"system", part});
+        }
+
         size_t max_lines = dims.dimy > 10 ? static_cast<size_t>(dims.dimy - 8) : 8;
-        size_t start = all.size() > max_lines ? all.size() - max_lines : 0;
-        if (all.empty()) body.push_back(text("输入一句话开始；/quit 退出") | dim);
-        for (size_t i = start; i < all.size(); ++i) body.push_back(render_line(all[i]));
+        size_t start = visible.size() > max_lines ? visible.size() - max_lines : 0;
+        Elements body;
+        for (size_t i = start; i < visible.size(); ++i) body.push_back(render_line(visible[i]));
 
         std::string session = model.session_id().empty() ? "no session" : model.session_id();
         std::string status = model.status() + "  |  session " + session + "  |  turns " +
                              std::to_string(model.turns());
+        Elements status_body;
+        for (const std::string& part : wrap_text(status, content_width))
+          status_body.push_back(text(part) | dim);
+
         Element doc = vbox({
             text("yxAgent TUI  (S9)") | bold,
             separator(),
@@ -287,10 +309,12 @@ int main(int argc, char** argv) {
             separator(),
             hbox({text("> ") | bold, input_comp->Render() | flex}),
             separator(),
-            text(status) | dim,
+            vbox(std::move(status_body)),
         });
-        if (model.approval_pending())
-          doc = dbox({doc, approval_modal(model.approval()) | center});
+        if (model.approval_pending()) {
+          const int modal_width = std::max(24, std::min(76, dims.dimx - 4));
+          doc = dbox({doc, approval_modal(model.approval(), modal_width - 2) | center});
+        }
         return doc;
       });
 

@@ -12,9 +12,9 @@
 |---|---|
 | 仓库 | `/root/project/yxAgent`（服务器 `111.228.29.170`） |
 | 分支 | `main` |
-| HEAD | tag `s9` 指向的提交 |
-| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` `s9` |
-| 测试 | `ctest` **13/13 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 28 / S6 端到端 31 / S7 10 组 107 项 / S8 11 组 56 项 / S9 TuiModel 18 + TUI 20 |
+| HEAD | tag `s9.1` 指向的提交 |
+| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` `s9` `s9.1` |
+| 测试 | `ctest` **14/14 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 28 / S6 端到端 31 / S7 10 组 107 项 / S8 11 组 56 项 / S9 TuiModel 18 + textwrap 6 + TUI 20 |
 | 工作区 | 干净（`.cache/`、`build/`、`model/` 已 gitignore） |
 | 正在做 | 无。S9 已收尾、已打 tag，下一个阶段是 S10 |
 
@@ -28,7 +28,7 @@ S9 的 TUI 是用**假 server / pty** 验的，真模型下的手动冒烟还没
 cd /root/project/yxAgent
 git log --oneline --decorate | head -5
 cmake --build build 2>&1 | tail -3
-cd build && ctest 2>&1 | tail -4     # 必须 13/13
+cd build && ctest 2>&1 | tail -4     # 必须 14/14
 ```
 
 全绿 = 基线完好，直接从 §5 开始。真实模型冒烟（**记得给 `--tools`**，默认不给工具）：
@@ -78,6 +78,7 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 | `s7` | 会话日志 + `session.load`/resume + `agent-run` | 会话文件只追加；恢复重建 `history_`（含 `[压缩]`）；带会话 `seq` 续号；一个会话一个写者；`agent-run` 只靠协议 |
 | `s8` | `Policy` + `approval.requested`/`approval.respond` + cli y/n | 判定在 core；ask 必须往返；deny 是工具失败不是 turn 失败；`--approval=never` 不发事件；`agent-run` 无人值守不挂起 |
 | `s9` | `agent-tui`（FTXUI vendored v5.0.0）+ `TuiModel` | 读取线程只 `Post`，状态只在 UI 线程；TUI 只消费事件、不执行工具；审批走 S8；Esc 取消 / Ctrl-C 退出 |
+| `s9.1` | TUI 换行修复（`textwrap`） | 按显示宽度逐 glyph 换行；中文/长 JSON 不横向溢出；消息/状态/审批弹窗共用 |
 
 ## 5. 下一步（S10：MCP 接入，~400 行）
 
@@ -115,6 +116,8 @@ DoD：
   要交互审批用 pipe 模式的 cli/tui。
 - **TUI 只渲染最后 `dimy-8` 行**：没有滚动回看 / 鼠标 / 搜索；S9 先保证输入、流式、工具、
   审批四个交互对，历史滚动留给后续。
+- **FTXUI 的 `text()` 不换行、`paragraph()` 只按空格切**：中文/长 JSON 会横向溢出；
+  统一走 `src/tui/textwrap.*`（按 `string_width` 逐 glyph 换行），新增内容别再直接 `text(长字符串)`。
 - **FTXUI 固定 vendored v5.0.0**：离线构建的代价；升级要重跑 pty 测试和 `VENDORED.md`。
 
 ## 7. 坑与约束（踩过的，别再踩）
