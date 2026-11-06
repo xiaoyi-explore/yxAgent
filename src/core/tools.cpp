@@ -1,5 +1,7 @@
 #include "core/tools.hpp"
 
+#include "common/utf8.hpp"
+
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -82,6 +84,8 @@ class ReadFileTool : public Tool {
     data.resize(max_bytes);
     f.read(&data[0], static_cast<std::streamsize>(max_bytes));
     data.resize(static_cast<size_t>(f.gcount()));
+    // max_bytes 可能正好切在 UTF-8 码点中间；JSON 序列化前先退到完整边界。
+    data.resize(proto::utf8_prefix_bytes(data, data.size()));
 
     if (total > static_cast<std::streamoff>(data.size())) {
       data += "\n[truncated: read " + std::to_string(data.size()) + " of " + std::to_string(total) +
@@ -238,6 +242,7 @@ class RunShellTool : public Tool {
              std::to_string(out.size()) + "]";
     }
 
+    out.resize(proto::utf8_prefix_bytes(out, out.size()));
     const std::string body = "exit_code=" + std::to_string(exit_code) + "\n" + out;
     if (timed_out)
       return ToolResult{false, body, "timeout after " + std::to_string(timeout_ms) + "ms (killed)"};

@@ -2,6 +2,8 @@
 
 #include <httplib.h>
 
+#include "common/utf8.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <map>
@@ -43,7 +45,7 @@ Endpoint parse_endpoint(const std::string& base_url) {
 
 std::string snippet(const std::string& s, size_t n = 300) {
   if (s.size() <= n) return s;
-  return s.substr(0, n) + "...";
+  return s.substr(0, proto::utf8_prefix_bytes(s, n)) + "...";
 }
 
 // 可重试 = **传输层**失败（连不上 / 连接被掐断 / 读超时），也就是"这一个请求根本没落地"。

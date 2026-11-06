@@ -1,5 +1,6 @@
 #include "core/core_engine.hpp"
 
+#include "common/utf8.hpp"
 #include "core/openai_compat.hpp"
 
 #include <algorithm>
@@ -45,7 +46,7 @@ std::vector<std::string> split_utf8_codepoints(const std::string& s) {
 // 报错里只想看开头一点：不要把整段模型输出糊进一条错误消息
 std::string truncate(const std::string& s, size_t n) {
   if (s.size() <= n) return s;
-  return s.substr(0, n) + "...";
+  return s.substr(0, proto::utf8_prefix_bytes(s, n)) + "...";
 }
 
 // 启用工具但没给 --system 时的默认提示词。

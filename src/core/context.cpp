@@ -1,5 +1,7 @@
 #include "core/context.hpp"
 
+#include "common/utf8.hpp"
+
 #include <algorithm>
 #include <utility>
 
@@ -18,10 +20,11 @@ constexpr size_t kToolFloor = 256;     // 兜底时工具结果最小留多少�
 
 // 压成一行：摘要里不能有换行，否则它看起来像好几条消息
 std::string one_line(const std::string& s, size_t cap) {
-  std::string out = s.substr(0, std::min(cap, s.size()));
+  const size_t n = proto::utf8_prefix_bytes(s, cap);
+  std::string out = s.substr(0, n);
   for (char& c : out)
     if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-  if (s.size() > cap) out += "…";
+  if (n < s.size()) out += "…";
   return out;
 }
 
@@ -77,8 +80,10 @@ CompactReport ContextManager::compact(std::vector<Message>& history) const {
     if (is_retrieval(history[i].name)) continue;    // 检索类：永不主动压缩
     if (history[i].content.size() <= cfg_.tool_result_cap) continue;
     const size_t orig = history[i].content.size();
-    history[i].content.resize(cfg_.tool_result_cap);
-    history[i].content += cut_marker(orig, cfg_.tool_result_cap);
+    const size_t kept = proto::utf8_prefix_bytes(history[i].content, cfg_.tool_result_cap);
+    if (kept >= orig) continue;
+    history[i].content.resize(kept);
+    history[i].content += cut_marker(orig, kept);
     ++rep.truncated_tools;
   }
 
@@ -91,8 +96,10 @@ CompactReport ContextManager::compact(std::vector<Message>& history) const {
         if (m.role != "tool") continue;
         if (m.content.size() <= cap) continue;
         const size_t orig = m.content.size();
-        m.content.resize(cap);
-        m.content += cut_marker(orig, cap);
+        const size_t kept = proto::utf8_prefix_bytes(m.content, cap);
+        if (kept >= orig) continue;
+        m.content.resize(kept);
+        m.content += cut_marker(orig, kept);
         ++rep.truncated_tools;
       }
       cap /= 2;
@@ -166,7 +173,7 @@ CompactReport ContextManager::compact(std::vector<Message>& history) const {
   if (turns == 0) return finish();   // 老轮全是"检索类"或者只有一个旧摘要：这一步无事可做
 
   std::string body = carry + summary;   // 旧摘要（更早）在前
-  if (body.size() > kSummaryCap) body.resize(kSummaryCap);
+  if (body.size() > kSummaryCap) body.resize(proto::utf8_prefix_bytes(body, kSummaryCap));
 
   std::vector<Message> rebuilt;
   rebuilt.reserve(history.size());

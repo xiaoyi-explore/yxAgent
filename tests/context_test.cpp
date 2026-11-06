@@ -240,6 +240,29 @@ int main() {
     (void)r1; (void)r2;
   }
 
+  // ---- 11. 截断不能切在 UTF-8 码点中间：否则下一次 json::dump() 会抛 ----
+  {
+    // 2047 个 ASCII + 一个 3 字节汉字 + 换行：旧代码 resize(2048) 会留下半个汉字，
+    // 再拼上 cut_marker 的 '\n'，就会报 invalid UTF-8 byte at index 2048: 0x0A。
+    const std::string content = std::string(2047, 'X') + "你\n" + std::string(4000, 'Y');
+    std::vector<Message> h{sys("s"), u("跑"), assistant_calls("run_shell"),
+                           tool_msg("run_shell", content), a("done"), u("继续"), a("ok")};
+    ContextManager cm(ContextConfig{/*max*/ 100000, 0.5, /*keep*/ 1, 2048});
+    cm.compact(h);
+    const size_t ti = index_of_role(h, "tool");
+    bool valid = true;
+    try {
+      nlohmann::json j = h[ti].content;
+      (void)j.dump();
+    } catch (...) {
+      valid = false;
+    }
+    check("裁剪：UTF-8 边界不被切断（dump 不抛）", valid,
+          ti < h.size() ? std::to_string(h[ti].content.size()) : "no tool");
+    check("裁剪：UTF-8 截断后仍带标记",
+          ti < h.size() && contains(h[ti].content, "[已截断"));
+  }
+
   std::printf("\n%s: %d\n", g_fail ? "FAILED" : "OK", g_fail);
   return g_fail ? 1 : 0;
 }

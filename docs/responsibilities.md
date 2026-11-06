@@ -107,7 +107,8 @@
 |---|---|---|
 | `src/core/context.hpp` / `.cpp` | ~60 / ~230 | `ContextManager`：估算 → 三级压缩（裁剪 / 摘要 / 兜底）。只认 `vector<Message>`，不认识协议/HTTP |
 | `src/core/core_engine.cpp` | +30 | 每个 step 进模型前压一次；发 `context.compacted`；`history_mark` 跟着往下挪 |
-| `tests/context_test.cpp` | ~250 | 纯单元测试（只链 `context.cpp`）：配对、豁免、兜底、不许变大，共 28 项 |
+| `src/common/utf8.hpp` (S9.2) | ~45 | `proto::utf8_prefix_bytes()`：按完整 UTF-8 码点截断；context/tools/错误 snippet 共用 |
+| `tests/context_test.cpp` | ~270 | 纯单元测试（只链 `context.cpp`）：配对、豁免、兜底、不许变大、UTF-8 边界，共 30 项 |
 | `tests/test_s6.py` | ~200 | 端到端：事件、`/__last` 里的压缩后请求、关压缩、cli 不再编造 tokens |
 
 ## S9 代码地图

@@ -134,6 +134,10 @@
 4. **短消息压不动是正确行为。** 第一版测试用"问题0""第1句"这种五六个字的对话，
    压缩永远触发不了（被决策 5 的硬保证拦住）。测试里的消息必须写成真实长度（几百字节），
    否则你测的是"摘要开销"而不是"压缩收益"。
+5. **按字节截断切开了汉字（S9.2 修）。** 非检索工具结果 `resize(2048)` 后追加
+   `\n[已截断...]`；如果第 2048 字节正好是中文的首字节，追加的 `0x0A` 就成了
+   非法续字节。下一次请求 `json::dump()` 抛 `type_error.316`，被统一映射成
+   `PROVIDER_ERROR`。修法见 §9。
 
 ---
 
@@ -163,3 +167,32 @@ export DEEPSEEK_API_KEY=$(head -1 /tmp/deepseek.key.bak)
                   --max-context-tokens 2000 --keep-recent-turns 1
 # 聊上七八轮（每轮说长一点），stderr 会打出 "[context] 已压缩 ~N -> ~M tokens …"
 ```
+
+---
+
+## 9. S9.2 修复：UTF-8 安全截断
+
+**现象**：`[context] compacted ~6444 -> ~4661` 之后，下一轮请求报
+
+```text
+[json.exception.type_error.316] invalid UTF-8 byte at index 2048: 0x0A
+```
+
+这不是模型/网络的错，是 **JSON 序列化** 在 `dump()` 时发现历史里有非法 UTF-8。
+
+**根因**：`ContextManager` 第一级裁剪用 `content.resize(2048)`，按**字节**切；
+如果 2047 是中文首字节（3 字节码点的第 1 字节），resize 会留下半个汉字，随后
+`+= cut_marker()` 又拼上 `\n`（0x0A）。0x0A 不是 0x80–0xBF 的续字节，于是
+"index 2048: 0x0A"。
+
+**修法**：
+
+- 新增 `src/common/utf8.hpp`：`proto::utf8_prefix_bytes(s, max)` 正向扫描，
+  只返回不超过 max 且停在**完整码点**边界的前缀。
+- 用在所有会进 JSON 的截断点：
+  - `context.cpp`：工具结果裁剪、兜底硬截断、摘要 `one_line` / `body` 上限；
+  - `tools.cpp`：`read_file` 的 `max_bytes`、`run_shell` 的输出 cap；
+  - `core_engine.cpp` / `openai_compat.cpp`：错误消息的 `truncate` / `snippet`。
+- `tests/context_test.cpp` 新增回归：
+  `string(2047,'X') + "你\n" + string(4000,'Y')` → 压缩 → `json.dump()` 不抛。
+- `ctest` 仍 **14/14**（s6_context_unit 多 2 项）。

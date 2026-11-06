@@ -12,9 +12,9 @@
 |---|---|
 | 仓库 | `/root/project/yxAgent`（服务器 `111.228.29.170`） |
 | 分支 | `main` |
-| HEAD | tag `s9.1` 指向的提交 |
-| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` `s9` `s9.1` |
-| 测试 | `ctest` **14/14 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 28 / S6 端到端 31 / S7 10 组 107 项 / S8 11 组 56 项 / S9 TuiModel 18 + textwrap 6 + TUI 20 |
+| HEAD | tag `s9.2` 指向的提交 |
+| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` `s9` `s9.1` `s9.2` |
+| 测试 | `ctest` **14/14 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 30 / S6 端到端 31 / S7 10 组 107 项 / S8 11 组 56 项 / S9 TuiModel 18 + textwrap 6 + TUI 20 |
 | 工作区 | 干净（`.cache/`、`build/`、`model/` 已 gitignore） |
 | 正在做 | 无。S9 已收尾、已打 tag，下一个阶段是 S10 |
 
@@ -79,6 +79,7 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 | `s8` | `Policy` + `approval.requested`/`approval.respond` + cli y/n | 判定在 core；ask 必须往返；deny 是工具失败不是 turn 失败；`--approval=never` 不发事件；`agent-run` 无人值守不挂起 |
 | `s9` | `agent-tui`（FTXUI vendored v5.0.0）+ `TuiModel` | 读取线程只 `Post`，状态只在 UI 线程；TUI 只消费事件、不执行工具；审批走 S8；Esc 取消 / Ctrl-C 退出 |
 | `s9.1` | TUI 换行修复（`textwrap`） | 按显示宽度逐 glyph 换行；中文/长 JSON 不横向溢出；消息/状态/审批弹窗共用 |
+| `s9.2` | UTF-8 安全截断（`common/utf8.hpp`） | 按字节 resize 不许切汉字；tool cap/摘要/read_file/run_shell/错误 snippet 都走完整码点边界 |
 
 ## 5. 下一步（S10：MCP 接入，~400 行）
 
@@ -199,6 +200,12 @@ DoD：
 - **workdir 必须先规范化**（`weakly_canonical` + `relative`），否则 `../` / 符号链接能逃逸。
 - **黑名单会误报**（`echo "rm -rf"` 也 ask）；宁可多问，不要漏。
 - **`agent-run` 默认 `--approval=never`**；即使显式 ask，也会自动 deny，不能挂起。
+
+**截断 / UTF-8**
+
+- **JSON 只接受合法 UTF-8**：任何 `resize(n)` / `substr(0,n)` 都可能切出半个汉字，
+  下一次 `json.dump()` 抛 `type_error.316`。统一用 `proto::utf8_prefix_bytes()`。
+- 典型现场：tool result 截到 2048 字节 + 追加 `"\n[已截断...]"` → `0x0A` 成了非法续字节。
 
 **测试**
 
