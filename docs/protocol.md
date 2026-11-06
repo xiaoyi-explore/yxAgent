@@ -103,7 +103,7 @@
 
 | 消息 | 引入阶段 | 一句话 |
 |---|---|---|
-| （暂无） | S9 | TUI 消费已有事件，不新增协议消息 |
+| （S9 不新增） | S9 | `agent-tui` 消费已有事件，不新增 wire 消息 |
 
 ---
 
@@ -614,3 +614,27 @@ core                                                front-end
 | 6 | allow 只执行一次；审批等待期间的 `turn.cancel` 生效 |
 
 设计记录（为什么"解释器 + 代码"永不 allow-list、为什么不是 OS 沙箱、踩坑）见 `docs/stage-s8.md`。
+
+### S9 追加：`agent-tui`（不新增 wire 消息）
+
+S9 只增加一个前端，不增加任何协议消息。TUI 消费的是 S1–S8 已有的帧：
+
+| 用途 | 已有消息 |
+|---|---|
+| 发消息 | `chat`（或 `demo.chat`） |
+| 流式渲染 | `assistant.delta` |
+| 工具可视 | `tool.call` / `tool.result` |
+| 压缩提示 | `context.compacted` |
+| 取消 | `turn.cancel` |
+| 审批弹窗 | `approval.requested` / `approval.respond` |
+| 会话 | `--session` / `--resume` / `hello.session` |
+
+实现约定（不是 wire 变化，但后续前端必须遵守）：
+
+- TUI **只消费事件**，不执行工具、不做权限判定；判定仍在 core。
+- TUI 的读取线程只做 `read_frame` -> `screen.Post`；状态只在 UI 线程修改。
+- `Esc` 在 busy 时发 `turn.cancel`；审批中发 `approval.respond(deny)`。
+- `Ctrl-C` 由 TUI 自己处理（raw mode 下不是默认 SIGINT）。
+- 审批弹窗的 `y/n` 只是 `approval.respond` 的 UI 外壳，不改变 S8 语义。
+
+设计记录（为什么 vendored FTXUI、读取线程、pty 测试、踩坑）见 `docs/stage-s9.md`。

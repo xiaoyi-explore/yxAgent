@@ -27,7 +27,16 @@
 | 收集用户输入 → request | —— | S1 | ✅ |
 | 把 `assistant.delta` 渲染成打字机效果（逐帧 flush） | core 从不发"渲染好的字符串" | S2 | ✅ |
 | 审批交互（cli 行内 y/n，S9 换弹窗） | 决策在 core；前端只负责问和回传 | S8 | ✅ |
-| TUI 主循环与事件队列 | FTXUI 的线程模型要求 | S9 | 🔜 |
+| TUI 主循环与事件队列 | FTXUI 的线程模型要求 | S9 | ✅ |
+
+## agent-tui（FTXUI 前端，S9）
+
+| 职责 | 为什么在 agent-tui | 引入阶段 | 状态 |
+|---|---|---|---|
+| FTXUI 视图（输入/消息/状态/审批弹窗） | 终端渲染只属于前端 | S9 | ✅ |
+| 读取线程 `read_frame` -> `screen.Post` | FTXUI 主循环不能被阻塞；状态只在 UI 线程 | S9 | ✅ |
+| `TuiModel` 纯状态 | 没有终端也能单测；视图状态与真相状态分离 | S9 | ✅ |
+| 不执行工具、不做审批判定 | 判定在 core；前端只问和回传 | S9 | ✅ |
 
 ## agent-run（headless 前端，S7）
 
@@ -58,6 +67,8 @@
    它是第二个前端，不是 core 的第二个入口；靠 `tests/test_s7.py` 的 grep 守。
 8. **权限判定只在 core（`Policy`）**：前端只能回 allow/deny，不能绕过策略直接执行工具；
    `--approval=allow` 是显式危险开关。
+9. **TUI 只消费事件、只改自己的视图状态**：`agent-tui` 不链接 `agent_core_lib`，不执行工具；
+   读取线程只能 `read_frame` + `screen.Post`。
 
 ## S1 代码地图
 
@@ -98,6 +109,17 @@
 | `src/core/core_engine.cpp` | +30 | 每个 step 进模型前压一次；发 `context.compacted`；`history_mark` 跟着往下挪 |
 | `tests/context_test.cpp` | ~250 | 纯单元测试（只链 `context.cpp`）：配对、豁免、兜底、不许变大，共 28 项 |
 | `tests/test_s6.py` | ~200 | 端到端：事件、`/__last` 里的压缩后请求、关压缩、cli 不再编造 tokens |
+
+## S9 代码地图
+
+| 文件 | 行数级 | 内容 |
+|---|---|---|
+| `src/tui/main.cpp` | ~380 | FTXUI 视图、CatchEvent（y/n/Esc/Ctrl-C）、读取线程 + `screen.Post` |
+| `src/tui/core_client.hpp/.cpp` | ~40 / ~150 | `CoreProcess`：spawn core、send、阻塞 `read_frame`、shutdown/kill |
+| `src/tui/tui_model.hpp/.cpp` | ~60 / ~200 | `TuiModel`：delta/tool/compact/approval/response -> lines/status（不依赖 FTXUI） |
+| `third_party/ftxui/` | vendored | FTXUI v5.0.0（MIT）；examples/doc 裁掉，CMake 注释两行 |
+| `tests/tui_model_test.cpp` | ~130 | 18 项纯状态测试 |
+| `tests/test_s9.py` | ~220 | pty 端到端：demo / 工具 / 审批 deny / 分层 |
 
 ## S8 代码地图
 

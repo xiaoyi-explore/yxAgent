@@ -12,15 +12,15 @@
 |---|---|
 | 仓库 | `/root/project/yxAgent`（服务器 `111.228.29.170`） |
 | 分支 | `main` |
-| HEAD | tag `s8` 指向的提交 |
-| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` |
-| 测试 | `ctest` **11/11 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 28 / S6 端到端 31 / S7 10 组 107 项 / S8 11 组 56 项 |
+| HEAD | tag `s9` 指向的提交 |
+| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` `s9` |
+| 测试 | `ctest` **13/13 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 28 / S6 端到端 31 / S7 10 组 107 项 / S8 11 组 56 项 / S9 TuiModel 18 + TUI 20 |
 | 工作区 | 干净（`.cache/`、`build/`、`model/` 已 gitignore） |
-| 正在做 | 无。S8 已收尾、已打 tag，下一个阶段是 S9 |
+| 正在做 | 无。S9 已收尾、已打 tag，下一个阶段是 S10 |
 
 **真实模型验证过的**：DeepSeek `deepseek-chat` 流式（11 增量、首字 0.57s）、工具循环
-（read_file → wc -l → 答 "5"，3 步 2.7s）。S5 的取消、S6 的压缩、S7 的 resume、S8 的审批
-是用**假 server** 验的，真模型下的手动冒烟还没做（见 §6 欠账）。
+（read_file → wc -l → 答 "5"，3 步 2.7s）。S5 的取消、S6 的压缩、S7 的 resume、S8 的审批、
+S9 的 TUI 是用**假 server / pty** 验的，真模型下的手动冒烟还没做（见 §6 欠账）。
 
 ## 2. 30 秒恢复
 
@@ -28,7 +28,7 @@
 cd /root/project/yxAgent
 git log --oneline --decorate | head -5
 cmake --build build 2>&1 | tail -3
-cd build && ctest 2>&1 | tail -4     # 必须 11/11
+cd build && ctest 2>&1 | tail -4     # 必须 13/13
 ```
 
 全绿 = 基线完好，直接从 §5 开始。真实模型冒烟（**记得给 `--tools`**，默认不给工具）：
@@ -55,8 +55,8 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 | `README.md` | 项目是什么、怎么跑、阶段进度、铁律 |
 | `docs/protocol.md` | 线上到底发什么帧 + 每阶段追加的不变量 |
 | `docs/responsibilities.md` | 谁拥有什么职责、逐阶段代码地图 |
-| `docs/stage-s2..s8.md` | 这些阶段**为什么**这么设计、替代方案、踩的坑 |
-| `docs/roadmap.md` | 阶段计划与 DoD（S0–S11；S9 的细节在那一节） |
+| `docs/stage-s2..s9.md` | 这些阶段**为什么**这么设计、替代方案、踩的坑 |
+| `docs/roadmap.md` | 阶段计划与 DoD（S0–S11；S10 的细节在那一节） |
 | `docs/manual.md` | **v1 设计稿**：架构/协议/选型的"为什么"。它的阶段划分**已作废**，别照它学 |
 | **本文件** | **现在在哪、下一步、怎么验证、有哪些坑** |
 
@@ -77,26 +77,27 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 | `s6` | 上下文预算与三级压缩 + `context.compacted` | 压缩只动 `history_`，不改协议；`history_mark` 跟着往下挪 |
 | `s7` | 会话日志 + `session.load`/resume + `agent-run` | 会话文件只追加；恢复重建 `history_`（含 `[压缩]`）；带会话 `seq` 续号；一个会话一个写者；`agent-run` 只靠协议 |
 | `s8` | `Policy` + `approval.requested`/`approval.respond` + cli y/n | 判定在 core；ask 必须往返；deny 是工具失败不是 turn 失败；`--approval=never` 不发事件；`agent-run` 无人值守不挂起 |
+| `s9` | `agent-tui`（FTXUI vendored v5.0.0）+ `TuiModel` | 读取线程只 `Post`，状态只在 UI 线程；TUI 只消费事件、不执行工具；审批走 S8；Esc 取消 / Ctrl-C 退出 |
 
-## 5. 下一步（S9：TUI 诞生，~700 行）⭐ 里程碑 M4
+## 5. 下一步（S10：MCP 接入，~400 行）
 
-**目标**：出现 `agent-tui`（FTXUI）：输入框 + 消息列表 + 流式打字机 + 状态栏 + 审批弹窗；
-cli 保留作调试前端。它消费的是**真实**的 delta / tool.call / approval.requested。
+**目标**：接一个外部 MCP server（stdio），把它的工具**并入**注册表；
+模型看到的是和内置工具一样的 `ToolSpec`，调用走同一条 `tool.call` / `tool.result`。
 
-交付物（细节读 `docs/roadmap.md` 的 S9 节）：
+交付物（细节读 `docs/roadmap.md` 的 S10 节）：
 
-1. `agent-tui`：FTXUI 视图；输入行、消息区、状态栏、Esc 取消。
-2. 流式增量渲染不卡键盘；工具调用可视；审批弹窗走 `approval.requested` / `approval.respond`。
-3. 视图状态与真相状态分离：core 仍是唯一真相，TUI 只是投影。
-4. 线程安全交接：IPC 线程收到帧 -> `screen.Post([&]{ ... })`，任务在主循环线程执行。
-5. cli 继续保留；S1–S8 十一套测试仍全绿（新增 `test_s9.py` 或 TUI 单元测试）。
+1. MCP stdio client：spawn server -> `initialize` / 能力协商 -> `tools/list` -> `tools/call`。
+2. 工具适配：MCP tool schema -> `ToolSpec`，MCP result -> `ToolResult`；命名冲突要吵。
+3. 配置：`--mcp` / 配置文件；server 的 stderr 不能污染协议 stdout。
+4. S8 的 Policy 对 MCP 工具同样生效（按工具名 + 参数判定）。
+5. 假 MCP server 测试；S1–S9 十三套仍全绿（新增 `tests/test_s10.py`）。
 
 DoD：
 
-- [ ] 流式输出时键盘仍可输入；Esc 能取消
-- [ ] `tool.call` / `tool.result` / `approval.requested` 在 UI 可见且可操作
-- [ ] 审批弹窗 allow/deny 都能正确回传
-- [ ] `protocol.md` §9 S9、`docs/stage-s9.md`、刷新本文件、打 tag `s9`
+- [ ] 接一个真实 MCP server（如 filesystem），对话中能调用它的工具
+- [ ] MCP server 中途死掉 / 返回坏 JSON 不拖垮 core
+- [ ] 工具名冲突、参数 schema 错误都有可行动错误
+- [ ] `protocol.md` §9 S10、`docs/stage-s10.md`、刷新本文件、打 tag `s10`
 
 ## 6. 欠账（明确推掉的，别忘）
 
@@ -107,11 +108,14 @@ DoD：
 - **模型摘要**（真让 LLM 写摘要）：S6 只做了抽取式，见 `docs/stage-s6.md` §5。
 - **S7 的崩溃恢复是 lean 版**：只在轮末 `session.commit`，轮中 SIGKILL 会丢掉整轮
   （包括 user 消息）。DSH 式"模型请求前 / 工具副作用前 checkpoint + `TOOL_OUTCOME_UNKNOWN`"
-  留给 S9；做之前先想清楚审批结果怎么和 commit 对齐。
+  留给后续；做之前先想清楚审批结果怎么和 commit 对齐。
 - **S8 的 Policy 是策略闸门，不是 OS 沙箱**：不改进程权限、不做 namespace/seccomp；
   shell 里的编码/注入仍可能绕过黑名单。真沙箱留给后续，别把 deny 宣传成内核级保证。
 - **`--embedded` 不支持审批**：同步回调里没有等回答的窗口，ask 直接 deny（事件仍发）；
   要交互审批用 pipe 模式的 cli/tui。
+- **TUI 只渲染最后 `dimy-8` 行**：没有滚动回看 / 鼠标 / 搜索；S9 先保证输入、流式、工具、
+  审批四个交互对，历史滚动留给后续。
+- **FTXUI 固定 vendored v5.0.0**：离线构建的代价；升级要重跑 pty 测试和 `VENDORED.md`。
 
 ## 7. 坑与约束（踩过的，别再踩）
 
@@ -172,6 +176,16 @@ DoD：
 - **一个会话一个写者**（`flock`）。第二个进程是 `SESSION_BUSY`，不是"两份日志合并"。
 - `session.load` 的请求帧不落盘（切换会话时它属于旧会话）；response 落到新会话。
 - `tests/fake_llm_tools.py` 的 `messages_full` 是 S7 **追加**的字段；老行为不许动。
+
+**TUI（S9）**
+
+- **FTXUI 不是线程安全的**：读取线程只能 `read_frame` + `screen.Post`，绝不直接改 `TuiModel`。
+- **Ctrl-C 在 raw mode 下是事件**（`Event::Special("\x03")`），不是默认 SIGINT；必须自己 `screen.Exit()`。
+- **退出顺序**：`running=false` -> send shutdown -> `core.stop()`（关 stdin / 500ms 后 SIGTERM）-> `join`；
+  反过来会卡在 `read()`。
+- **pty 测试必须设窗口大小**（`TIOCSWINSZ`），否则 FTXUI 按 0 行渲染，断言全红。
+- **FTXUI 的 CMakeLists 无条件 add_subdirectory(examples/doc)**：只复制 include/src 时要注释掉，
+  见 `third_party/ftxui/VENDORED.md`。
 
 **权限 / 审批（S8）**
 
