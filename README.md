@@ -118,3 +118,10 @@ third_party/ftxui/        S9 vendored FTXUI v5.0.0（MIT，见 VENDORED.md）
 tests/                    ctest 驱动：Python 端到端 + 两个 C++ 单元测试 + fixtures
 docs/                     见上面的文档地图
 ```
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE). Third-party components keep their own licenses:
+`third_party/httplib.h` (MIT) and `third_party/ftxui` (MIT, see its `VENDORED.md`).

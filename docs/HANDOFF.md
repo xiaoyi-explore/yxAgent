@@ -12,8 +12,8 @@
 |---|---|
 | 仓库 | `/root/project/yxAgent`（服务器 `111.228.29.170`） |
 | 分支 | `main` |
-| HEAD | tag `s9.2` 指向的提交 |
-| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` `s9` `s9.1` `s9.2` |
+| HEAD | tag `s9.3` 指向的提交 |
+| tag | `s0` `s1` `s2` `s3a` `s3b` `s4` `s5` `s6` `s7` `s8` `s9` `s9.1` `s9.2` `s9.3` |
 | 测试 | `ctest` **14/14 全绿**：S1 12 / S2 33 / S3a 20 / S3b 74 / SSE 24 / S4 51 / S5 24 / S6 单元 30 / S6 端到端 31 / S7 10 组 107 项 / S8 11 组 56 项 / S9 TuiModel 18 + textwrap 6 + TUI 20 |
 | 工作区 | 干净（`.cache/`、`build/`、`model/` 已 gitignore） |
 | 正在做 | 无。S9 已收尾、已打 tag，下一个阶段是 S10 |
@@ -80,6 +80,7 @@ printf '第二句\n' | ./build/agent-cli --resume --session-dir /tmp/s7sessions 
 | `s9` | `agent-tui`（FTXUI vendored v5.0.0）+ `TuiModel` | 读取线程只 `Post`，状态只在 UI 线程；TUI 只消费事件、不执行工具；审批走 S8；Esc 取消 / Ctrl-C 退出 |
 | `s9.1` | TUI 换行修复（`textwrap`） | 按显示宽度逐 glyph 换行；中文/长 JSON 不横向溢出；消息/状态/审批弹窗共用 |
 | `s9.2` | UTF-8 安全截断（`common/utf8.hpp`） | 按字节 resize 不许切汉字；tool cap/摘要/read_file/run_shell/错误 snippet 都走完整码点边界 |
+| `s9.3` | MIT 开源许可 | 根目录 `LICENSE`；README 标注；第三方（httplib/FTXUI）保留各自 MIT |
 
 ## 5. 下一步（S10：MCP 接入，~400 行）
 
